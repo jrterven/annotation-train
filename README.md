@@ -22,13 +22,125 @@ Small mask holes can be filled explicitly with an adjustable pixel-area threshol
 
 Requires **Python 3.12**, **Node.js 22.x (22.13 or later), 24.x, or 26+**, and npm. Target platforms are macOS Apple Silicon, Linux, and Windows through WSL. SAM 3 has been validated on an M4 Max using MPS and CPU; Linux/CUDA and WSL still require testing on those systems. See [VALIDATION.md](VALIDATION.md) for measured results and limitations.
 
+### 1. Install Python 3.12
+
+Choose the instructions for your operating system. The installer requires the **3.12** series; check with `python3.12 --version` even if another Python version is already installed.
+
+#### macOS (Apple Silicon)
+
+Open **Terminal**. If Homebrew is not installed, use the command from the [official Homebrew website](https://brew.sh/):
+
 ```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Follow the installer's **Next steps** to add Homebrew to your shell's `PATH`, then open a new Terminal window. Install the [versioned Python 3.12 formula](https://formulae.brew.sh/formula/python@3.12) and Git:
+
+```sh
+brew update
+brew install python@3.12 git
+python3.12 --version
+python3.12 -m venv --help
+```
+
+Homebrew provides `python3.12` separately from the system Python. If the command is not found on Apple Silicon, check that `/opt/homebrew/bin` is in your `PATH` using the Homebrew installer's instructions.
+
+#### Linux
+
+**Ubuntu 24.04 LTS:** open a terminal and install Python and its virtual-environment package from Ubuntu's repositories. Both [python3.12](https://packages.ubuntu.com/noble/python3.12) and [python3.12-venv](https://packages.ubuntu.com/noble/python3.12-venv) are available for this release.
+
+```sh
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv git curl
+python3.12 --version
+python3.12 -m venv --help
+```
+
+**Other Linux distributions or Ubuntu releases:** if your repositories do not provide Python 3.12, install a separate interpreter with [uv's standalone installer](https://docs.astral.sh/uv/getting-started/installation/) and its [Python version manager](https://docs.astral.sh/uv/guides/install-python/). Install `curl` and `git` with your distribution's package manager first, then run:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Open a new terminal so the updated `PATH` takes effect, then run:
+
+```sh
+uv python install 3.12
+uv python update-shell
+```
+
+Open another terminal and verify:
+
+```sh
+python3.12 --version
+python3.12 -m venv --help
+```
+
+uv installs a user-managed Python interpreter without replacing the distribution's system Python. Continue with the same application setup commands below.
+
+#### Windows (WSL 2 with Ubuntu 24.04)
+
+Use **Windows 11** or **Windows 10 version 2004 / build 19041 or later**. This application's Windows workflow runs inside WSL 2. Follow [Microsoft's WSL installation guide](https://learn.microsoft.com/en-us/windows/wsl/install) and [Ubuntu's WSL guide](https://documentation.ubuntu.com/wsl/latest/howto/install-ubuntu-wsl2/) if WSL needs additional setup.
+
+Open **PowerShell as Administrator**. If WSL is already installed, update it first with `wsl --update`. Then install Ubuntu:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Restart Windows if prompted. Open Ubuntu from the Start menu, or run this in PowerShell:
+
+```powershell
+wsl -d Ubuntu-24.04
+```
+
+Create the Linux username and password when prompted. In the **Ubuntu terminal**, install Python 3.12:
+
+```sh
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv git curl
+python3.12 --version
+python3.12 -m venv --help
+```
+
+Run all remaining Python, Node.js, Git, and application commands **inside Ubuntu**. Keep the repository in your Linux home directory, such as `~/annotation-train`. You can open the web interface in your normal Windows browser at `http://localhost:8765` after starting the server.
+
+### 2. Install Node.js and check prerequisites
+
+Install **Node.js 24 LTS with npm** using the [official Node.js download instructions](https://nodejs.org/en/download). On macOS, choose the macOS installer for Apple Silicon. On Linux and Windows/WSL, follow the Linux instructions in your Linux terminal so `node` and `npm` are available to the Python setup script.
+
+In the same terminal you will use for installation, check:
+
+```sh
+python3.12 --version
+node --version
+npm --version
+git --version
+```
+
+Python should report `3.12.x`, and Node.js should report `v24.x` if you followed the recommendation. If a command is missing after installation, open a new terminal before continuing.
+
+### 3. Download and install the application
+
+Clone the repository, enter it, and run setup. If you already downloaded the repository, enter its directory and run only the setup command.
+
+```sh
+git clone https://github.com/jrterven/annotation-train.git
+cd annotation-train
 python3.12 scripts/setup.py
 ```
 
 Setup creates `.venv`, installs the pinned Python dependencies, and builds the frontend. It does not install Python or modify its global environment. Run setup again after pulling dependency updates.
 
-Manual installation:
+Setup uses an isolated `.venv`; no activation is required. Start the application with:
+
+```sh
+.venv/bin/python run.py
+```
+
+On WSL, use `.venv/bin/python run.py --no-browser` and open `http://localhost:8765` in your Windows browser. Continue with [SAM 3 access](#sam-3-access) to authorize and download the model weights.
+
+**Manual installation** (alternative to `scripts/setup.py`, from the repository directory):
 
 ```sh
 python3.12 -m venv .venv
@@ -41,6 +153,8 @@ cd ..
 
 For a CUDA installation on Linux/WSL, follow the [official PyTorch installation instructions](https://pytorch.org/get-started/locally/) for your GPU, retaining the versions in `requirements.txt`. Apple GPU acceleration runs directly on macOS through MPS; Docker is not required.
 
+**Common setup issues:** if setup reports a different Python version, rerun it explicitly with `python3.12`. If Ubuntu reports that `ensurepip` or `venv` is unavailable, install `python3.12-venv` and rerun setup. If `.venv` was created with another Python version or by an interrupted installation, rename that directory, then rerun setup to create a fresh environment. The virtual environment contains dependencies; image projects and annotations live in their separately selected directories.
+
 ## SAM 3 access
 
 1. Request access and accept the terms for the official [facebook/sam3 weights](https://huggingface.co/facebook/sam3).
@@ -52,10 +166,10 @@ Text proposals use `Sam3Model`; points, boxes, and mask refinement use `Sam3Trac
 ## Run
 
 ```sh
-python3 run.py
+.venv/bin/python run.py
 # Optional device selection:
-python3 run.py --device mps
-python3 run.py --device cpu --no-browser
+.venv/bin/python run.py --device mps
+.venv/bin/python run.py --device cpu --no-browser
 ```
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The server listens only on localhost. Press `Ctrl+C` to stop it. Initial model loading can take longer than subsequent requests.
@@ -145,7 +259,7 @@ npm run test
 npm run build
 ```
 
-For development, run `python3 run.py --dev --no-browser` and start `npm run dev` inside `frontend/`; Vite proxies API requests to the local backend.
+For development, run `.venv/bin/python run.py --dev --no-browser` and start `npm run dev` inside `frontend/`; Vite proxies API requests to the local backend.
 
 Real SAM 3 checks require authorized weights and are separate from unit tests. Run `.venv/bin/python scripts/benchmark_sam3.py --help` to benchmark your own images. Mocked responses are not evidence of model quality. See [API_CONTRACT.md](API_CONTRACT.md) for the API and [VALIDATION.md](VALIDATION.md) for validation details.
 
