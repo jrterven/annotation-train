@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -34,6 +34,7 @@ import {
   Link2,
   SlidersHorizontal,
   ScanLine,
+  Pentagon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api, assetURL, errorText, uid } from "./api";
@@ -56,20 +57,21 @@ import CanvasEditor from "./CanvasEditor";
 import type { Vertex } from "./CanvasEditor";
 import { FileBrowser, ProjectDialog } from "./ProjectDialog";
 const PALETTE = [
-  "#9f9ce0",
-  "#75a88d",
-  "#dba17a",
-  "#829fc6",
-  "#c78e9f",
-  "#c2b36f",
-  "#72afb1",
-  "#ab91bc",
+  "#7856e8",
+  "#16a577",
+  "#e87c26",
+  "#397be6",
+  "#df4d6d",
+  "#cfaa13",
+  "#119ca8",
+  "#b84dcc",
 ];
 const signature = (part: Part) =>
   JSON.stringify({
     points: part.points,
     box: part.box,
     seed_mask: part.seed_mask,
+    polygon: part.polygon,
   });
 function IconButton({
   icon: Icon,
@@ -84,20 +86,31 @@ function IconButton({
   active?: boolean;
   disabled?: boolean;
 }) {
+  const tooltipId = useId();
   return (
-    <button
-      type="button"
-      className={`icon-button ${active ? "active" : ""}`}
-      title={title}
-      aria-label={title}
-      aria-pressed={active}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      <Icon size={18} strokeWidth={1.7} />
-    </button>
+    <span className="tool-control">
+      <button
+        type="button"
+        className={`icon-button ${active ? "active" : ""}`}
+        aria-label={title}
+        aria-describedby={tooltipId}
+        aria-pressed={active}
+        onClick={onClick}
+        disabled={disabled}
+      >
+        <Icon size={18} strokeWidth={1.7} />
+      </button>
+      <span className="tool-tooltip" role="tooltip" id={tooltipId}>
+        {title}
+      </span>
+    </span>
   );
 }
+type TextPrompt = {
+  original: string;
+  english: string;
+  source_language: "en" | "es";
+};
 type Pending = {
   controller: AbortController;
   token: string;
@@ -113,7 +126,7 @@ export default function App() {
   const [loadingImage, setLoadingImage] = useState(false);
   const [model, setModel] = useState<ModelStatus>({
     state: "unloaded",
-    message: "SAM 3 listo para cargar",
+    message: "SAM 3 is ready to load",
   });
   const [modelLoading, setModelLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -123,8 +136,12 @@ export default function App() {
   const [categoryId, setCategoryId] = useState<number>(0);
   const [inspector, setInspector] = useState(true);
   const [showMasks, setShowMasks] = useState(true);
-  const [opacity, setOpacity] = useState(0.38);
+  const [opacity, setOpacity] = useState(0.65);
   const [text, setText] = useState("");
+  const [promptLanguage, setPromptLanguage] = useState<"en" | "es">("en");
+  const [textPrompts, setTextPrompts] = useState<Record<number, TextPrompt>>(
+    {},
+  );
   const [help, setHelp] = useState(false);
   const [categoryDialog, setCategoryDialog] = useState<Category | "new" | null>(
     null,
@@ -138,6 +155,7 @@ export default function App() {
   const [conflictImage, setConflictImage] = useState<number | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [geometryBusy, setGeometryBusy] = useState(false);
+  const [maxHoleArea, setMaxHoleArea] = useState("16");
   const [workVersion, setWorkVersion] = useState(0);
   const pending = useRef(new Map<string, Pending>());
   const fitRef = useRef<(() => void) | null>(null);
@@ -167,6 +185,16 @@ export default function App() {
       i.file_name.toLowerCase().includes(query.toLowerCase()),
     ) || [];
   const selectedProposals = state?.proposals.filter((p) => p.selected) || [];
+  const activePart = state?.draft?.parts.find(
+    (part) => part.id === state.draft?.active_part_id,
+  );
+  const activePolygon = activePart?.polygon;
+  const currentTextPrompt = imageId === null ? undefined : textPrompts[imageId];
+  const holeArea = Number(maxHoleArea);
+  const validHoleArea =
+    Number.isSafeInteger(holeArea) &&
+    holeArea >= 1 &&
+    holeArea <= (currentImage ? currentImage.width * currentImage.height : 0);
   function invalidate() {
     setWorkVersion((v) => v + 1);
   }
@@ -187,6 +215,8 @@ export default function App() {
     setTool("positive");
     setExportPath("");
     setQuery("");
+    setTextPrompts({});
+    setText("");
     setProjectDialog(false);
   }
   useEffect(() => {
@@ -218,7 +248,7 @@ export default function App() {
           if (active)
             setModel({
               state: "error",
-              message: "No se pudo conectar con el servidor local.",
+              message: "Could not connect to the local server.",
             });
         });
     check();
@@ -258,7 +288,7 @@ export default function App() {
     setCategoryDialog("new");
     setCategoryName("");
     setCategoryColor(PALETTE[project?.categories.length || 0]);
-    setToast("Crea una clase para empezar a anotar.");
+    setToast("Create a class to start annotating.");
     return false;
   }
   function update(fn: (s: ImageState) => ImageState, history = true) {
@@ -266,7 +296,7 @@ export default function App() {
   }
   async function navigateTo(id: number) {
     if (geometryBusy || confirming) {
-      setToast("Espera a que termine de actualizarse la máscara.");
+      setToast("Wait for the mask update to finish.");
       return;
     }
     try {
@@ -314,9 +344,50 @@ export default function App() {
       kind: "points",
     });
     invalidate();
-    const captured = signature(part);
+    let captured = signature(part);
     const revision = workspace.get(id)?.revision || 0;
+    const isCurrent = () => {
+      const fresh = workspace.get(id);
+      const freshPart = fresh?.draft?.parts.find((p) => p.id === part.id);
+      return (
+        pending.current.get(key)?.token === token &&
+        fresh?.draft?.id === draftId &&
+        !!freshPart &&
+        signature(freshPart) === captured
+      );
+    };
     try {
+      if (part.polygon && !part.seed_mask) {
+        if (!part.polygon.closed)
+          throw new Error("Close the polygon before refining it.");
+        const seed = await api<GeometryResult>(
+          "/geometry",
+          "POST",
+          {
+            image_id: id,
+            components: [{ outer: part.polygon.vertices, holes: [] }],
+          },
+          controller.signal,
+        );
+        if (!isCurrent()) return;
+        part = { ...part, seed_mask: seed.mask };
+        captured = signature(part);
+        workspace.update(
+          id,
+          (s) => ({
+            ...s,
+            draft: s.draft
+              ? {
+                  ...s.draft,
+                  parts: s.draft.parts.map((p) =>
+                    p.id === part.id ? { ...p, seed_mask: seed.mask } : p,
+                  ),
+                }
+              : null,
+          }),
+          false,
+        );
+      }
       const result = await api<
         GeometryResult & { image_id: number; revision: number }
       >(
@@ -325,16 +396,7 @@ export default function App() {
         { image_id: id, revision, part },
         controller.signal,
       );
-      const fresh = workspace.get(id);
-      const freshPart = fresh?.draft?.parts.find((p) => p.id === part.id);
-      if (
-        pending.current.get(key)?.token !== token ||
-        fresh?.draft?.id !== draftId ||
-        !freshPart ||
-        signature(freshPart) !== captured ||
-        result.image_id !== id
-      )
-        return;
+      if (!isCurrent() || result.image_id !== id) return;
       workspace.update(
         id,
         (s) => ({
@@ -358,14 +420,83 @@ export default function App() {
         }),
         false,
       );
+      if (
+        part.polygon &&
+        activeImage.current === id &&
+        workspace.get(id)?.draft?.active_part_id === part.id
+      )
+        setTool((current) => (current === "polygon" ? "positive" : current));
     } catch (e) {
-      if (!(e instanceof Error && e.name === "AbortError"))
+      if (
+        pending.current.get(key)?.token === token &&
+        !(e instanceof Error && e.name === "AbortError")
+      )
         setToast(`SAM 3: ${errorText(e)}`);
     } finally {
       if (pending.current.get(key)?.token === token)
         pending.current.delete(key);
       invalidate();
     }
+  }
+  function changePolygon(vertices: XY[], closed: boolean) {
+    if (imageId === null || !state || confirming || !categoryRequired()) return;
+    const draft = prepareDraft(state);
+    let index = draft.parts.findIndex((p) => p.id === draft.active_part_id);
+    let original = draft.parts[index];
+    // A polygon starts a separate part if the current part already has prompts.
+    if (
+      !original.polygon &&
+      (original.points.length ||
+        original.box ||
+        original.seed_mask ||
+        original.mask)
+    ) {
+      original = { id: uid(), points: [] };
+      draft.parts.push(original);
+      index = draft.parts.length - 1;
+      draft.active_part_id = original.id;
+    }
+    const key = `part:${imageId}:${original.id}`;
+    pending.current.get(key)?.controller.abort();
+    pending.current.delete(key);
+    draft.parts[index] = {
+      id: original.id,
+      points: [],
+      polygon: { vertices, closed },
+    };
+    update((s) => ({ ...s, draft }));
+    setSelected(null);
+    setVertex(null);
+    invalidate();
+  }
+  function closePolygon() {
+    if (!activePolygon || activePolygon.closed) return;
+    if (activePolygon.vertices.length < 3) {
+      setToast("A polygon needs at least three vertices.");
+      return;
+    }
+    changePolygon(activePolygon.vertices, true);
+  }
+  function refinePolygon() {
+    if (
+      imageId === null ||
+      !state?.draft ||
+      !activePart?.polygon?.closed ||
+      pointBusy ||
+      confirming
+    )
+      return;
+    void inferPart(imageId, state.draft.id, activePart);
+  }
+  function resumeDraft() {
+    if (!categoryRequired()) return;
+    setSelected(null);
+    setVertex(null);
+    setTool(
+      activePolygon && (!activePolygon.closed || !activePart?.seed_mask)
+        ? "polygon"
+        : "positive",
+    );
   }
   function addPrompt(
     point?: XY,
@@ -376,6 +507,12 @@ export default function App() {
     const draft = prepareDraft(state);
     const index = draft.parts.findIndex((p) => p.id === draft.active_part_id);
     const original = draft.parts[index];
+    if (original.polygon && !original.seed_mask) {
+      setToast(
+        "Close the polygon and click Refine with SAM before adding corrections.",
+      );
+      return;
+    }
     const next = {
       ...original,
       ...(point
@@ -448,10 +585,15 @@ export default function App() {
   }
   async function confirmDraft() {
     if (imageId === null || !state?.draft || confirming) return;
+    if (
+      !pointBusy &&
+      state.draft.parts.some((part) => part.polygon && !part.mask)
+    ) {
+      setToast("Refine the polygon with SAM before confirming.");
+      return;
+    }
     if (pointBusy || state.draft.parts.some((p) => !p.mask)) {
-      setToast(
-        "Espera la máscara más reciente; completa o elimina las partes vacías.",
-      );
+      setToast("Wait for the latest mask; complete or remove empty parts.");
       return;
     }
     const id = imageId,
@@ -503,6 +645,7 @@ export default function App() {
         image_id: number;
         revision: number;
         proposals: Proposal[];
+        prompt?: TextPrompt;
       }>(
         "/infer/text",
         "POST",
@@ -510,6 +653,7 @@ export default function App() {
           image_id: id,
           revision: state.revision,
           text: text.trim(),
+          source_language: promptLanguage,
           category_id: categoryId,
         },
         controller.signal,
@@ -524,13 +668,22 @@ export default function App() {
         ...s,
         proposals: result.proposals.map((p) => ({ ...p, selected: false })),
       }));
+      const usedPrompt = result.prompt;
+      setTextPrompts((prompts) => {
+        const next = { ...prompts };
+        if (usedPrompt) next[id] = usedPrompt;
+        else delete next[id];
+        return next;
+      });
       if (activeImage.current === id) {
         setSelected(null);
         setTool("select");
       }
       if (!result.proposals.length)
         setToast(
-          "No se encontraron objetos para ese texto. Prueba una descripción corta.",
+          usedPrompt?.source_language === "es"
+            ? `No objects found for “${usedPrompt.english}”. Try a different description.`
+            : "No objects found. Try a short description in English.",
         );
     } catch (e) {
       if (!(e instanceof Error && e.name === "AbortError"))
@@ -562,7 +715,7 @@ export default function App() {
   function refineProposal(proposal: Proposal) {
     if (state?.draft) {
       setToast(
-        "Confirma o descarta el borrador actual antes de refinar otra propuesta.",
+        "Confirm or discard the current draft before refining another proposal.",
       );
       return;
     }
@@ -618,6 +771,59 @@ export default function App() {
       if (geometryToken.current === token) setGeometryBusy(false);
     }
   }
+  async function fillSmallHoles() {
+    if (
+      imageId === null ||
+      !selectedAnnotation ||
+      !validHoleArea ||
+      geometryBusy ||
+      confirming
+    )
+      return;
+    const image = imageId,
+      annotation = selectedAnnotation,
+      token = uid(),
+      session = sessionToken.current;
+    const geometrySnapshot = (a: Annotation) =>
+      JSON.stringify([a.mask, a.components, a.controls]);
+    const original = geometrySnapshot(annotation);
+    geometryToken.current = token;
+    setGeometryBusy(true);
+    try {
+      const result = await api<
+        GeometryResult & { filled_holes: number; filled_pixels: number }
+      >("/masks/fill-holes", "POST", {
+        image_id: image,
+        mask: annotation.mask,
+        max_area: holeArea,
+      });
+      if (geometryToken.current !== token || sessionToken.current !== session)
+        return;
+      const current = workspace
+        .get(image)
+        ?.annotations.find((a) => a.id === annotation.id);
+      if (!current || geometrySnapshot(current) !== original) return;
+      if (!result.filled_holes) {
+        setToast(`No holes at or below ${holeArea} px².`);
+        return;
+      }
+      const { filled_holes, filled_pixels, ...geometry } = result;
+      workspace.update(image, (s) => ({
+        ...s,
+        annotations: s.annotations.map((a) =>
+          a.id === annotation.id ? { ...a, ...geometry } : a,
+        ),
+      }));
+      setVertex(null);
+      setToast(
+        `Filled ${filled_holes} ${filled_holes === 1 ? "hole" : "holes"} (${filled_pixels} ${filled_pixels === 1 ? "pixel" : "pixels"}).`,
+      );
+    } catch (e) {
+      if (geometryToken.current === token) setToast(errorText(e));
+    } finally {
+      if (geometryToken.current === token) setGeometryBusy(false);
+    }
+  }
   function removeSelected() {
     if (geometryBusy) return;
     if (selectedAnnotation && vertex) {
@@ -629,7 +835,7 @@ export default function App() {
           ? components[vertex.component].outer
           : components[vertex.component].holes[vertex.ring - 1];
       if (ring.length <= 3) {
-        setToast("Un contorno necesita al menos tres vértices.");
+        setToast("A contour needs at least three vertices.");
         return;
       }
       ring.splice(vertex.index, 1);
@@ -666,33 +872,33 @@ export default function App() {
   }
   async function saveAll() {
     if (geometryBusy || confirming) {
-      setToast("Espera a que termine de actualizarse la máscara.");
+      setToast("Wait for the mask update to finish.");
       return;
     }
     try {
       await workspace.flush();
-      setToast("Todos los cambios están guardados.");
+      setToast("All changes saved.");
     } catch (e) {
       setToast(errorText(e));
     }
   }
   async function exportCoco() {
     if (geometryBusy || confirming) {
-      setToast("Espera a que termine de actualizarse la máscara.");
+      setToast("Wait for the mask update to finish.");
       return;
     }
     try {
       await workspace.flush();
       const result = await api<{ path: string }>("/coco/export", "POST", {});
       setExportPath(result.path);
-      setToast("COCO guardado en la carpeta del proyecto.");
+      setToast("COCO saved to the project directory.");
     } catch (e) {
       setToast(errorText(e));
     }
   }
   async function switchProject() {
     if (geometryBusy || confirming) {
-      setToast("Espera a que termine de actualizarse la máscara.");
+      setToast("Wait for the mask update to finish.");
       return;
     }
     try {
@@ -753,7 +959,7 @@ export default function App() {
     );
     const a = document.createElement("a");
     a.href = url;
-    a.download = `recuperación-imagen-${recoveryId}.json`;
+    a.download = `image-recovery-${recoveryId}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -786,7 +992,8 @@ export default function App() {
       if (mod) return;
       if (e.key === "Enter") {
         e.preventDefault();
-        void confirmDraft();
+        if (activePolygon && !activePolygon.closed) closePolygon();
+        else void confirmDraft();
       } else if (e.key === "Escape") {
         setSelected(null);
         setVertex(null);
@@ -802,15 +1009,15 @@ export default function App() {
         navigate(imageIndex - 1);
       } else if (e.key.toLowerCase() === "v") setTool("select");
       else if (e.key.toLowerCase() === "p") setTool("positive");
-      else if (e.key.toLowerCase() === "n") {
-        if (categoryRequired()) {
-          setSelected(null);
-          setTool("positive");
-        }
-      } else if (e.key === "-" || e.key.toLowerCase() === "e")
+      else if (e.key.toLowerCase() === "n") resumeDraft();
+      else if (e.key === "-" || e.key.toLowerCase() === "e")
         setTool("negative");
       else if (e.key.toLowerCase() === "b") setTool("box");
-      else if (e.key.toLowerCase() === "f") fitRef.current?.();
+      else if (e.key.toLowerCase() === "g") {
+        setTool("polygon");
+        setSelected(null);
+        setVertex(null);
+      } else if (e.key.toLowerCase() === "f") fitRef.current?.();
       else if (e.key.toLowerCase() === "h") setShowMasks((v) => !v);
       else if (e.key === "?") setHelp(true);
     };
@@ -830,20 +1037,18 @@ export default function App() {
           className="brand"
           href="#"
           onClick={(e) => e.preventDefault()}
-          aria-label="Atelier"
+          aria-label="Annotation and Training"
         >
           <span className="brand-icon">
             <ScanLine size={23} strokeWidth={1.4} />
           </span>
-          <span>
-            atelier<span className="brand-dot">.</span>
-          </span>
+          <span>Annotation and Training</span>
         </a>
         <span className="header-divider" />
         {project ? (
           <button
             className="project-switch"
-            title="Cambiar de proyecto"
+            title="Switch project"
             onClick={() => void switchProject()}
           >
             <FolderOpen size={15} />
@@ -851,12 +1056,12 @@ export default function App() {
             <ChevronDown size={14} />
           </button>
         ) : (
-          <span className="header-tagline">Anotación, con precisión.</span>
+          <span className="header-tagline">Image annotation</span>
         )}
         <div className="header-actions">
           <button
             className={`model-status ${modelReady ? "ready" : ""}`}
-            title={model.message || "Cargar SAM 3"}
+            title={model.message || "Load SAM 3"}
             onClick={() => void ensureLoad()}
             disabled={modelLoading || model.state === "loading"}
           >
@@ -870,35 +1075,35 @@ export default function App() {
               {modelReady && model.device
                 ? ` · ${model.device.toUpperCase()}`
                 : model.state === "auth_required"
-                  ? " · acceso pendiente"
+                  ? " · access required"
                   : model.state === "loading"
-                    ? " · cargando"
+                    ? " · loading"
                     : model.state === "error"
-                      ? " · revisar"
+                      ? " · error"
                       : ""}
             </span>
           </button>
           <IconButton
             icon={HelpCircle}
-            title="Atajos de teclado · ?"
+            title="Keyboard shortcuts · ?"
             onClick={() => setHelp(true)}
           />
           {project && (
             <>
               <button
                 className="button secondary compact"
-                title="Guardar · ⌘ S"
+                title="Save · ⌘ S"
                 onClick={() => void saveAll()}
               >
                 <Save size={15} />
-                <span>Guardar</span>
+                <span>Save</span>
               </button>
               <button
                 className="button primary compact"
                 onClick={() => void exportCoco()}
               >
                 <Download size={15} />
-                <span>Exportar COCO</span>
+                <span>Export COCO</span>
               </button>
             </>
           )}
@@ -907,19 +1112,7 @@ export default function App() {
       {!project ? (
         <main className="welcome">
           <div className="welcome-copy">
-            <span className="eyebrow">
-              <span className="tiny-line" /> DE LA IMAGEN AL MODELO
-            </span>
-            <h1>
-              El detalle
-              <br />
-              hace la diferencia<span>.</span>
-            </h1>
-            <p>
-              Segmenta con SAM 3.
-              <br />
-              Ajusta cada contorno. Entrena mejores modelos.
-            </p>
+            <h1>Image annotation</h1>
             <button
               className="button primary welcome-cta"
               disabled={booting}
@@ -930,99 +1123,29 @@ export default function App() {
               ) : (
                 <FolderOpen size={18} />
               )}{" "}
-              Abrir proyecto <ArrowUpRight size={17} />
+              Open project <ArrowUpRight size={17} />
             </button>
-            <div className="welcome-features">
-              <span>
-                <MousePointer2 size={15} /> Clics y cajas
-              </span>
-              <span>
-                <Sparkles size={15} /> Texto a máscaras
-              </span>
-              <span>
-                <Layers3 size={15} /> COCO JSON
-              </span>
-            </div>
           </div>
-          <div className="welcome-art" aria-hidden="true">
-            <div className="art-grid" />
-            <svg viewBox="0 0 500 500">
-              <defs>
-                <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stopColor="#bbc6ac" />
-                  <stop offset="100%" stopColor="#6e846f" />
-                </linearGradient>
-              </defs>
-              <path
-                d="M251 397 C123 366 110 211 303 108 C395 243 379 340 251 397Z"
-                fill="url(#leaf)"
-                opacity=".8"
-              />
-              <path
-                d="M251 397 C123 366 110 211 303 108 C395 243 379 340 251 397Z"
-                fill="none"
-                stroke="#f8f5e9"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M251 397 C260 298 275 207 303 108 M268 278 L202 236 M282 225 L331 198 M257 329 L195 297"
-                fill="none"
-                stroke="#526d58"
-                strokeWidth="1"
-                opacity=".5"
-              />
-              {[
-                [251, 397],
-                [181, 350],
-                [165, 272],
-                [201, 191],
-                [254, 141],
-                [303, 108],
-                [344, 189],
-                [362, 269],
-                [335, 341],
-              ].map(([x, y], i) => (
-                <rect
-                  key={i}
-                  x={x - 4}
-                  y={y - 4}
-                  width="8"
-                  height="8"
-                  rx="2"
-                  fill="#faf8ed"
-                  stroke="#648168"
-                />
-              ))}
-            </svg>
-            <span className="art-caption">
-              <span className="status-dot" /> Cada contorno cuenta.
-            </span>
-            <span className="art-corner">01 / SEGMENTACIÓN</span>
-          </div>
-          <footer className="welcome-footer">
-            <span>Local. Tus imágenes, en tu equipo.</span>
-            <span>ESPACIO DE SEGMENTACIÓN</span>
-          </footer>
         </main>
       ) : (
         <>
           <div className="workspace">
             <aside className="image-sidebar">
               <div className="sidebar-heading">
-                <span>Imágenes</span>
+                <span>Images</span>
                 <span className="count-pill">{project.images.length}</span>
                 <IconButton
                   icon={Link2}
-                  title="Reconectar carpeta de imágenes"
+                  title="Relink image directory"
                   onClick={() => setRelink(true)}
                 />
               </div>
               <div className="image-search">
                 <input
-                  aria-label="Filtrar imágenes"
+                  aria-label="Filter images"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Buscar imagen…"
+                  placeholder="Search images…"
                 />
               </div>
               <div className="image-list">
@@ -1055,9 +1178,9 @@ export default function App() {
                         <span>{img.file_name.split("/").pop()}</span>
                         <small>
                           {count
-                            ? `${count} instancia${count === 1 ? "" : "s"}`
-                            : "Sin anotar"}
-                          {local?.draft ? " · borrador" : ""}
+                            ? `${count} instance${count === 1 ? "" : "s"}`
+                            : "Unannotated"}
+                          {local?.draft ? " · draft" : ""}
                         </small>
                       </div>
                       <span className="image-index">
@@ -1069,25 +1192,25 @@ export default function App() {
                 {!visibleImages.length && (
                   <div className="empty-panel">
                     {project.images.length
-                      ? "Sin coincidencias"
-                      : "No hay imágenes en esta carpeta."}
+                      ? "No matches"
+                      : "No images in this directory."}
                   </div>
                 )}
               </div>
               <div className="image-list-footer">
                 <span>
-                  {Math.max(0, imageIndex + 1)} de {project.images.length}
+                  {Math.max(0, imageIndex + 1)} of {project.images.length}
                 </span>
                 <div>
                   <IconButton
                     icon={ArrowUp}
-                    title="Imagen anterior · ↑"
+                    title="Previous image · ↑"
                     disabled={imageIndex <= 0}
                     onClick={() => navigate(imageIndex - 1)}
                   />
                   <IconButton
                     icon={ArrowDown}
-                    title="Imagen siguiente · ↓"
+                    title="Next image · ↓"
                     disabled={imageIndex >= project.images.length - 1}
                     onClick={() => navigate(imageIndex + 1)}
                   />
@@ -1096,93 +1219,149 @@ export default function App() {
             </aside>
             <main className="editor-main">
               <div className="editor-toolbar">
-                <div className="tool-group">
+                <div className="toolbar-controls">
+                  <div className="tool-group">
+                    <IconButton
+                      icon={MousePointer2}
+                      title="Select and edit · V"
+                      active={tool === "select"}
+                      onClick={() => setTool("select")}
+                    />
+                    <IconButton
+                      icon={Plus}
+                      title="Positive point · P"
+                      active={tool === "positive"}
+                      onClick={() => {
+                        setTool("positive");
+                        setSelected(null);
+                      }}
+                    />
+                    <IconButton
+                      icon={Minus}
+                      title="Negative point · E"
+                      active={tool === "negative"}
+                      onClick={() => {
+                        setTool("negative");
+                        setSelected(null);
+                      }}
+                    />
+                    <IconButton
+                      icon={BoxSelect}
+                      title="Bounding box · B"
+                      active={tool === "box"}
+                      onClick={() => {
+                        setTool("box");
+                        setSelected(null);
+                      }}
+                    />
+                    <IconButton
+                      icon={Pentagon}
+                      title="Polygon · G"
+                      active={tool === "polygon"}
+                      onClick={() => {
+                        setTool("polygon");
+                        setSelected(null);
+                        setVertex(null);
+                      }}
+                    />
+                  </div>
+                  <span className="toolbar-divider" />
+                  <div className="category-control">
+                    <i
+                      style={{
+                        background: selectedCategory?.color || "#9b9a90",
+                      }}
+                    />
+                    <select
+                      aria-label="Active class"
+                      value={categoryId}
+                      onChange={(e) => setCategoryId(Number(e.target.value))}
+                    >
+                      {!project.categories.length && (
+                        <option value={0}>Create a class</option>
+                      )}
+                      {project.categories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="icon-button small"
+                      title="Create class"
+                      onClick={() => editCategory("new")}
+                    >
+                      <Plus size={15} />
+                    </button>
+                  </div>
+                  <div className="toolbar-spacer" />
                   <IconButton
-                    icon={MousePointer2}
-                    title="Seleccionar y editar · V"
-                    active={tool === "select"}
-                    onClick={() => setTool("select")}
+                    icon={Undo2}
+                    title="Undo · ⌘ Z"
+                    disabled={!entry?.past.length || geometryBusy}
+                    onClick={() => undo()}
                   />
                   <IconButton
-                    icon={Plus}
-                    title="Punto positivo · P"
-                    active={tool === "positive"}
-                    onClick={() => {
-                      setTool("positive");
-                      setSelected(null);
-                    }}
+                    icon={Redo2}
+                    title="Redo · ⇧ ⌘ Z"
+                    disabled={!entry?.future.length || geometryBusy}
+                    onClick={() => undo(true)}
+                  />
+                  <span className="toolbar-divider" />
+                  <IconButton
+                    icon={showMasks ? Eye : EyeOff}
+                    title="Show/hide masks · H"
+                    active={!showMasks}
+                    onClick={() => setShowMasks((v) => !v)}
                   />
                   <IconButton
-                    icon={Minus}
-                    title="Punto negativo · E"
-                    active={tool === "negative"}
-                    onClick={() => {
-                      setTool("negative");
-                      setSelected(null);
-                    }}
-                  />
-                  <IconButton
-                    icon={BoxSelect}
-                    title="Caja · B"
-                    active={tool === "box"}
-                    onClick={() => {
-                      setTool("box");
-                      setSelected(null);
-                    }}
+                    icon={inspector ? PanelRightClose : PanelRightOpen}
+                    title={inspector ? "Hide panel" : "Show panel"}
+                    onClick={() => setInspector((v) => !v)}
                   />
                 </div>
-                <span className="toolbar-divider" />
-                <div className="category-control">
-                  <i
-                    style={{ background: selectedCategory?.color || "#9b9a90" }}
-                  />
-                  <select
-                    aria-label="Clase activa"
-                    value={categoryId}
-                    onChange={(e) => setCategoryId(Number(e.target.value))}
+                {currentImage && state && (
+                  <form
+                    className="text-prompt-bar"
+                    aria-label="Text segmentation"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void inferText();
+                    }}
                   >
-                    {!project.categories.length && (
-                      <option value={0}>Crear una clase</option>
-                    )}
-                    {project.categories.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    className="icon-button small"
-                    title="Crear clase"
-                    onClick={() => editCategory("new")}
-                  >
-                    <Plus size={15} />
-                  </button>
-                </div>
-                <div className="toolbar-spacer" />
-                <IconButton
-                  icon={Undo2}
-                  title="Deshacer · ⌘ Z"
-                  disabled={!entry?.past.length || geometryBusy}
-                  onClick={() => undo()}
-                />
-                <IconButton
-                  icon={Redo2}
-                  title="Rehacer · ⇧ ⌘ Z"
-                  disabled={!entry?.future.length || geometryBusy}
-                  onClick={() => undo(true)}
-                />
-                <span className="toolbar-divider" />
-                <IconButton
-                  icon={showMasks ? Eye : EyeOff}
-                  title="Mostrar/ocultar máscaras · H"
-                  active={!showMasks}
-                  onClick={() => setShowMasks((v) => !v)}
-                />
-                <IconButton
-                  icon={inspector ? PanelRightClose : PanelRightOpen}
-                  title={inspector ? "Ocultar panel" : "Mostrar panel"}
-                  onClick={() => setInspector((v) => !v)}
-                />
+                    <Sparkles size={17} />
+                    <select
+                      className="prompt-language"
+                      aria-label="Prompt language"
+                      title="Spanish prompts are translated to English locally"
+                      value={promptLanguage}
+                      onChange={(e) =>
+                        setPromptLanguage(e.target.value as "en" | "es")
+                      }
+                    >
+                      <option value="en">English</option>
+                      <option value="es">Spanish</option>
+                    </select>
+                    <input
+                      aria-label="Object to segment"
+                      placeholder={`Object to segment (in ${promptLanguage === "es" ? "Spanish" : "English"})`}
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!text.trim() || textBusy}
+                      title="Generate proposals with SAM 3"
+                      aria-label="Generate proposals with SAM 3"
+                    >
+                      {textBusy ? (
+                        <LoaderCircle className="spin" size={16} />
+                      ) : (
+                        <ArrowUpRight size={18} />
+                      )}
+                    </button>
+                  </form>
+                )}
               </div>
               <div className="canvas-area">
                 {currentImage && state && !loadingImage ? (
@@ -1198,7 +1377,7 @@ export default function App() {
                     showMasks={showMasks}
                     opacity={opacity}
                     vertex={vertex}
-                    busy={geometryBusy}
+                    busy={geometryBusy || confirming}
                     onVertex={setVertex}
                     onSelect={setSelected}
                     onProposal={(id) =>
@@ -1214,6 +1393,7 @@ export default function App() {
                     }
                     onPoint={(point, negative) => addPrompt(point, negative)}
                     onBox={(box) => addPrompt(undefined, false, box)}
+                    onPolygon={changePolygon}
                     onGeometry={(id, c) => void editGeometry(id, c)}
                     fitRef={fitRef}
                   />
@@ -1222,56 +1402,51 @@ export default function App() {
                     {loadingImage ? (
                       <>
                         <LoaderCircle size={26} className="spin" />
-                        <span>Cargando imagen…</span>
+                        <span>Loading image…</span>
                       </>
                     ) : (
                       <>
                         <ImagePlus size={38} strokeWidth={1} />
-                        <span>
-                          Abre una carpeta con imágenes para comenzar.
-                        </span>
+                        <span>No images</span>
                       </>
                     )}
                   </div>
                 )}
-                {currentImage && state && (
-                  <form
-                    className="text-prompt-bar"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void inferText();
-                    }}
-                  >
-                    <Sparkles size={17} />
-                    <input
-                      aria-label="Descripción para SAM 3"
-                      placeholder="Describe qué quieres segmentar…"
-                      value={text}
-                      onChange={(e) => setText(e.target.value)}
-                    />
-                    <button
-                      type="submit"
-                      disabled={!text.trim() || textBusy}
-                      title="Generar propuestas con SAM 3"
-                    >
-                      {textBusy ? (
-                        <LoaderCircle className="spin" size={16} />
-                      ) : (
-                        <ArrowUpRight size={18} />
-                      )}
-                    </button>
-                  </form>
-                )}
+
                 {currentImage && state?.draft && (
                   <div className="draft-floating">
                     <span>
                       <i />
-                      {pointBusy ? "Segmentando…" : "Borrador"}{" "}
+                      {pointBusy ? "Segmenting…" : "Draft"}{" "}
                       <small>
-                        {state.draft.parts.length} parte
+                        {state.draft.parts.length} part
                         {state.draft.parts.length === 1 ? "" : "s"}
                       </small>
                     </span>
+                    {activePolygon && !activePolygon.closed ? (
+                      <button
+                        className="button secondary compact"
+                        disabled={
+                          activePolygon.vertices.length < 3 || confirming
+                        }
+                        onClick={closePolygon}
+                      >
+                        Close polygon <kbd>↵</kbd>
+                      </button>
+                    ) : activePolygon && !activePart?.mask ? (
+                      <button
+                        className="button primary compact"
+                        disabled={pointBusy || confirming}
+                        onClick={refinePolygon}
+                      >
+                        {pointBusy ? (
+                          <LoaderCircle className="spin" size={14} />
+                        ) : (
+                          <ScanLine size={14} />
+                        )}
+                        Refine with SAM
+                      </button>
+                    ) : null}
                     <button
                       className="button primary compact"
                       disabled={!readyToConfirm}
@@ -1282,7 +1457,7 @@ export default function App() {
                       ) : (
                         <Check size={14} />
                       )}{" "}
-                      Confirmar <kbd>↵</kbd>
+                      Confirm <kbd>↵</kbd>
                     </button>
                   </div>
                 )}
@@ -1291,7 +1466,7 @@ export default function App() {
             {inspector && (
               <aside className="inspector">
                 <div className="inspector-heading">
-                  <span>Objetos</span>
+                  <span>Objects</span>
                   <span className="count-pill">
                     {state?.annotations.length || 0}
                   </span>
@@ -1301,11 +1476,12 @@ export default function App() {
                   <section className="draft-panel">
                     <div className="panel-label">
                       <span>
-                        <Circle size={11} fill="currentColor" /> Objeto en curso
+                        <Circle size={11} fill="currentColor" /> Object in
+                        progress
                       </span>
                       <IconButton
                         icon={Trash2}
-                        title="Descartar borrador"
+                        title="Discard draft"
                         onClick={discardDraft}
                       />
                     </div>
@@ -1318,7 +1494,7 @@ export default function App() {
                         }}
                       />
                       <select
-                        aria-label="Clase del borrador"
+                        aria-label="Draft class"
                         value={state.draft.category_id}
                         onChange={(e) =>
                           update((s) => ({
@@ -1356,27 +1532,39 @@ export default function App() {
                                 }),
                                 false,
                               );
-                              setTool("positive");
+                              setTool(
+                                part.polygon && !part.seed_mask
+                                  ? "polygon"
+                                  : "positive",
+                              );
                               setSelected(null);
                             }}
                           >
-                            <span>Parte {i + 1}</span>
+                            <span>Part {i + 1}</span>
                             <small>
                               {part.mask
-                                ? "Lista"
-                                : part.points.length || part.box
-                                  ? "Pendiente"
-                                  : "Añade un clic"}
+                                ? "Ready"
+                                : part.polygon && !part.seed_mask
+                                  ? part.polygon.closed
+                                    ? "Closed polygon"
+                                    : `${part.polygon.vertices.length} vertices`
+                                  : part.points.length ||
+                                      part.box ||
+                                      part.seed_mask
+                                    ? "Pending"
+                                    : "No prompts"}
                             </small>
                           </button>
                           {!part.mask &&
-                            (part.points.length > 0 || part.box) &&
+                            (part.points.length > 0 ||
+                              part.box ||
+                              part.seed_mask) &&
                             !pending.current.has(
                               `part:${imageId}:${part.id}`,
                             ) && (
                               <IconButton
                                 icon={RotateCcw}
-                                title="Reintentar segmentación"
+                                title="Retry segmentation"
                                 onClick={() =>
                                   imageId !== null &&
                                   state.draft &&
@@ -1386,14 +1574,45 @@ export default function App() {
                             )}
                           <IconButton
                             icon={X}
-                            title="Eliminar parte"
+                            title="Remove part"
                             onClick={() => removePart(part.id)}
                           />
                         </div>
                       ))}
                     </div>
+                    {activePolygon && (
+                      <div className="polygon-actions">
+                        {activePolygon.closed && (
+                          <button
+                            className="text-button"
+                            disabled={confirming}
+                            onClick={() => {
+                              changePolygon(activePolygon.vertices, false);
+                              setTool("polygon");
+                            }}
+                          >
+                            <Pentagon size={14} /> Edit polygon
+                          </button>
+                        )}
+                        {!activePolygon.closed &&
+                          activePolygon.vertices.length > 0 && (
+                            <button
+                              className="text-button"
+                              disabled={confirming}
+                              onClick={() =>
+                                changePolygon(
+                                  activePolygon.vertices.slice(0, -1),
+                                  false,
+                                )
+                              }
+                            >
+                              <Undo2 size={14} /> Remove last vertex
+                            </button>
+                          )}
+                      </div>
+                    )}
                     <button className="text-button add-part" onClick={addPart}>
-                      <Plus size={14} /> Añadir parte al objeto
+                      <Plus size={14} /> Add part to object
                     </button>
                   </section>
                 )}
@@ -1401,15 +1620,27 @@ export default function App() {
                   <section className="proposals-panel">
                     <div className="panel-label">
                       <span>
-                        <Sparkles size={13} /> Propuestas{" "}
+                        <Sparkles size={13} /> Proposals{" "}
                         <b>{state?.proposals.length}</b>
                       </span>
                       <IconButton
                         icon={X}
-                        title="Descartar propuestas"
+                        title="Discard proposals"
                         onClick={() => update((s) => ({ ...s, proposals: [] }))}
                       />
                     </div>
+                    {currentTextPrompt && (
+                      <p
+                        className="proposal-prompt"
+                        title={
+                          currentTextPrompt.source_language === "es"
+                            ? `Original: ${currentTextPrompt.original}`
+                            : currentTextPrompt.english
+                        }
+                      >
+                        Prompt: <strong>{currentTextPrompt.english}</strong>
+                      </p>
+                    )}
                     <div className="proposal-actions">
                       <button
                         className="text-button"
@@ -1427,10 +1658,10 @@ export default function App() {
                         }
                       >
                         {state?.proposals.every((p) => p.selected)
-                          ? "Ninguna"
-                          : "Seleccionar todas"}
+                          ? "Deselect all"
+                          : "Select all"}
                       </button>
-                      <span>{selectedProposals.length} elegidas</span>
+                      <span>{selectedProposals.length} selected</span>
                     </div>
                     {state?.proposals.map((proposal, i) => (
                       <div
@@ -1439,7 +1670,7 @@ export default function App() {
                       >
                         <button
                           className="proposal-checkbox"
-                          aria-label={`Seleccionar propuesta ${i + 1}`}
+                          aria-label={`Select proposal ${i + 1}`}
                           aria-pressed={proposal.selected}
                           onClick={() =>
                             update(
@@ -1458,15 +1689,15 @@ export default function App() {
                           {proposal.selected && <Check size={12} />}
                         </button>
                         <span>
-                          Propuesta {i + 1}
+                          Proposal {i + 1}
                           <small>{Math.round(proposal.score * 100)}%</small>
                         </span>
                         <button
                           className="text-button"
                           onClick={() => refineProposal(proposal)}
-                          title="Refinar con clics"
+                          title="Refine with clicks"
                         >
-                          Refinar
+                          Refine
                         </button>
                       </div>
                     ))}
@@ -1475,7 +1706,7 @@ export default function App() {
                       disabled={!selectedProposals.length}
                       onClick={acceptProposals}
                     >
-                      <CheckCheck size={15} /> Aceptar seleccionadas
+                      <CheckCheck size={15} /> Accept selected
                     </button>
                   </section>
                 )}
@@ -1485,30 +1716,17 @@ export default function App() {
                   !state?.proposals.length ? (
                     <div className="objects-empty">
                       <Layers3 size={27} strokeWidth={1} />
-                      <h3>
-                        Una imagen.
-                        <br />
-                        Muchas posibilidades.
-                      </h3>
-                      <p>
-                        Elige una clase y haz clic
-                        <br />
-                        sobre tu primer objeto.
-                      </p>
+                      <h3>No annotations</h3>
                       <button
                         className="button secondary compact"
-                        onClick={() => {
-                          if (categoryRequired()) setTool("positive");
-                        }}
+                        onClick={resumeDraft}
                       >
-                        <Plus size={14} /> Nuevo objeto
+                        <Plus size={14} /> New object
                       </button>
                     </div>
                   ) : (
                     <>
-                      <div className="section-caption">
-                        INSTANCIAS CONFIRMADAS
-                      </div>
+                      <div className="section-caption">CONFIRMED INSTANCES</div>
                       {state?.annotations.map((a, i) => {
                         const cat = project.categories.find(
                           (c) => c.id === a.category_id,
@@ -1527,11 +1745,11 @@ export default function App() {
                               style={{ background: cat?.color || "#a29bcc" }}
                             />
                             <span>
-                              {cat?.name || "Sin clase"}
+                              {cat?.name || "No class"}
                               <small>
                                 #{String(i + 1).padStart(2, "0")}
                                 {a.components.length > 1
-                                  ? ` · ${a.components.length} partes`
+                                  ? ` · ${a.components.length} parts`
                                   : ""}
                               </small>
                             </span>
@@ -1545,15 +1763,10 @@ export default function App() {
                       })}
                       <button
                         className="text-button new-object"
-                        onClick={() => {
-                          if (categoryRequired()) {
-                            setSelected(null);
-                            setTool("positive");
-                          }
-                        }}
+                        onClick={resumeDraft}
                       >
                         <Plus size={14} />{" "}
-                        {state?.draft ? "Continuar borrador" : "Nuevo objeto"}
+                        {state?.draft ? "Resume draft" : "New object"}
                       </button>
                     </>
                   )}
@@ -1561,19 +1774,17 @@ export default function App() {
                 {selectedAnnotation && (
                   <section className="selection-panel">
                     <div className="panel-label">
-                      <span>Editar instancia</span>
+                      <span>Edit instance</span>
                       <IconButton
                         icon={Trash2}
                         title={
-                          vertex
-                            ? "Eliminar vértice seleccionado"
-                            : "Eliminar instancia"
+                          vertex ? "Delete selected vertex" : "Delete instance"
                         }
                         onClick={removeSelected}
                       />
                     </div>
                     <select
-                      aria-label="Clase de la instancia"
+                      aria-label="Instance class"
                       value={selectedAnnotation.category_id}
                       onChange={(e) =>
                         update((s) => ({
@@ -1593,13 +1804,43 @@ export default function App() {
                       ))}
                     </select>
                     <p className="field-note">
-                      Arrastra puntos para ajustar el contorno. Doble clic en el
-                      borde para añadir uno.
+                      Drag vertices to adjust the contour. Double-click an edge
+                      to add a vertex.
                     </p>
+                    <div className="hole-cleanup">
+                      <label>
+                        <span>Holes up to</span>
+                        <input
+                          type="number"
+                          aria-label="Maximum hole area"
+                          title="Maximum enclosed hole area in original-image pixels"
+                          min={1}
+                          max={
+                            currentImage
+                              ? currentImage.width * currentImage.height
+                              : undefined
+                          }
+                          step={1}
+                          value={maxHoleArea}
+                          disabled={geometryBusy || confirming}
+                          onChange={(e) => setMaxHoleArea(e.target.value)}
+                        />
+                        <span>px²</span>
+                      </label>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        title="Fill small enclosed gaps without changing the outer mask boundary. Undo restores the original mask."
+                        disabled={geometryBusy || confirming || !validHoleArea}
+                        onClick={() => void fillSmallHoles()}
+                      >
+                        Fill small holes
+                      </button>
+                    </div>
                     {geometryBusy && (
                       <span className="inline-status">
-                        <LoaderCircle className="spin" size={13} /> Actualizando
-                        máscara…
+                        <LoaderCircle className="spin" size={13} /> Updating
+                        mask…
                       </span>
                     )}
                   </section>
@@ -1607,10 +1848,10 @@ export default function App() {
                 <div className="inspector-bottom">
                   <section className="classes-panel">
                     <div className="panel-label">
-                      <span>Clases</span>
+                      <span>Classes</span>
                       <IconButton
                         icon={Plus}
-                        title="Crear clase"
+                        title="Create class"
                         onClick={() => editCategory("new")}
                       />
                     </div>
@@ -1621,7 +1862,7 @@ export default function App() {
                           className={categoryId === c.id ? "active" : ""}
                           onClick={() => setCategoryId(c.id)}
                           onDoubleClick={() => editCategory(c)}
-                          title={`${c.name} · doble clic para editar`}
+                          title={`${c.name} · double-click to edit`}
                         >
                           <i style={{ background: c.color }} />
                           {c.name}
@@ -1629,22 +1870,22 @@ export default function App() {
                       ))}
                       {!project.categories.length && (
                         <button onClick={() => editCategory("new")}>
-                          <Plus size={12} /> Crear primera clase
+                          <Plus size={12} /> Create first class
                         </button>
                       )}
                     </div>
                   </section>
                   <div className="opacity-control">
                     <Eye size={14} />
-                    <span>Opacidad</span>
+                    <span>Opacity</span>
                     <input
                       type="range"
                       min="0.1"
-                      max="0.8"
+                      max="1"
                       step="0.05"
                       value={opacity}
                       onChange={(e) => setOpacity(Number(e.target.value))}
-                      aria-label="Opacidad de máscaras"
+                      aria-label="Mask opacity"
                     />
                   </div>
                 </div>
@@ -1665,21 +1906,21 @@ export default function App() {
                     }}
                   >
                     {failedRecord[1].conflict
-                      ? "Conflicto de guardado · revisar"
-                      : "No guardado · reintentar"}
+                      ? "Save conflict · review"
+                      : "Not saved · retry"}
                   </button>
                 </>
               ) : anySaving ? (
                 <>
-                  <LoaderCircle size={12} className="spin" /> Guardando…
+                  <LoaderCircle size={12} className="spin" /> Saving…
                 </>
               ) : anyDirty ? (
                 <>
-                  <Circle size={8} fill="currentColor" /> Cambios pendientes
+                  <Circle size={8} fill="currentColor" /> Unsaved changes
                 </>
               ) : (
                 <>
-                  <Check size={13} /> Guardado localmente
+                  <Check size={13} /> Saved locally
                 </>
               )}
             </div>
@@ -1693,12 +1934,12 @@ export default function App() {
                   download
                   title={exportPath}
                 >
-                  <Download size={12} /> Descargar COCO
+                  <Download size={12} /> Download COCO
                 </a>
               ) : (
                 <>
                   <Command size={11} />
-                  <span>Esc para suspender · ↵ para confirmar</span>
+                  <span>Esc to suspend · ↵ to confirm</span>
                 </>
               )}
             </div>
@@ -1708,7 +1949,10 @@ export default function App() {
       {toast && (
         <div className="toast" role="status">
           <span>{toast}</span>
-          <button onClick={() => setToast(null)} aria-label="Cerrar aviso">
+          <button
+            onClick={() => setToast(null)}
+            aria-label="Dismiss notification"
+          >
             <X size={15} />
           </button>
         </div>
@@ -1732,7 +1976,7 @@ export default function App() {
               });
               setProject(result);
               setRelink(false);
-              setToast("Carpeta de imágenes reconectada.");
+              setToast("Image directory relinked.");
             } catch (e) {
               setToast(errorText(e));
             }
@@ -1745,15 +1989,13 @@ export default function App() {
             className="modal small-modal"
             role="dialog"
             aria-modal="true"
-            aria-label="Clase de objeto"
+            aria-label="Object class"
           >
             <div className="modal-heading">
-              <h2>
-                {categoryDialog === "new" ? "Nueva clase" : "Editar clase"}
-              </h2>
+              <h2>{categoryDialog === "new" ? "New class" : "Edit class"}</h2>
               <IconButton
                 icon={X}
-                title="Cerrar"
+                title="Close"
                 onClick={() => setCategoryDialog(null)}
               />
             </div>
@@ -1764,14 +2006,14 @@ export default function App() {
               }}
             >
               <label className="field-label" htmlFor="category-name">
-                Nombre
+                Name
               </label>
               <input
                 autoFocus
                 id="category-name"
                 value={categoryName}
                 onChange={(e) => setCategoryName(e.target.value)}
-                placeholder="Por ejemplo, tomate"
+                placeholder="For example, carrot"
                 required
               />
               <label className="field-label">Color</label>
@@ -1789,7 +2031,7 @@ export default function App() {
                   </button>
                 ))}
                 <input
-                  aria-label="Color personalizado"
+                  aria-label="Custom color"
                   type="color"
                   value={categoryColor}
                   onChange={(e) => setCategoryColor(e.target.value)}
@@ -1806,7 +2048,7 @@ export default function App() {
                   ) : (
                     <Check size={15} />
                   )}{" "}
-                  Guardar clase
+                  Save class
                 </button>
               </footer>
             </form>
@@ -1819,34 +2061,32 @@ export default function App() {
             className="modal small-modal"
             role="dialog"
             aria-modal="true"
-            aria-label="Atajos de teclado"
+            aria-label="Keyboard shortcuts"
           >
             <div className="modal-heading">
-              <div>
-                <span className="eyebrow">MENOS CLICS, MÁS PRECISIÓN</span>
-                <h2>Tu teclado también anota.</h2>
-              </div>
+              <h2>Keyboard shortcuts</h2>
               <IconButton
                 icon={X}
-                title="Cerrar"
+                title="Close"
                 onClick={() => setHelp(false)}
               />
             </div>
             <div className="shortcut-list">
               {[
-                ["N", "Nuevo objeto / reanudar borrador"],
-                ["P / E", "Punto positivo / negativo"],
-                ["B", "Dibujar caja"],
-                ["V", "Seleccionar y editar"],
-                ["↵", "Confirmar objeto"],
-                ["Esc", "Suspender borrador / deseleccionar"],
-                ["↑ / ↓", "Cambiar imagen sin selección"],
-                ["⌘ / Ctrl + Z", "Deshacer"],
-                ["⇧ ⌘ / Ctrl + Y", "Rehacer"],
-                ["⌘ / Ctrl + S", "Guardar"],
-                ["⌫", "Eliminar vértice / instancia"],
-                ["F / H", "Ajustar imagen / mostrar máscaras"],
-                ["Espacio + arrastrar", "Desplazar imagen"],
+                ["N", "New object / resume draft"],
+                ["P / E", "Positive point / negative"],
+                ["B", "Draw bounding box"],
+                ["G", "Draw polygon"],
+                ["V", "Select and edit"],
+                ["↵", "Close polygon / confirm object"],
+                ["Esc", "Suspend draft / deselect"],
+                ["↑ / ↓", "Change image when nothing is selected"],
+                ["⌘ / Ctrl + Z", "Undo"],
+                ["⇧ ⌘ / Ctrl + Y", "Redo"],
+                ["⌘ / Ctrl + S", "Save"],
+                ["⌫", "Delete vertex / instance"],
+                ["F / H", "Fit image / show masks"],
+                ["Space + drag", "Pan image"],
               ].map(([key, label]) => (
                 <div key={key}>
                   <span>{label}</span>
@@ -1863,24 +2103,24 @@ export default function App() {
             className="modal small-modal"
             role="dialog"
             aria-modal="true"
-            aria-label="Conflicto de guardado"
+            aria-label="Save conflict"
           >
             <div className="modal-heading">
-              <h2>Hay otra versión guardada.</h2>
+              <h2>Another version has been saved.</h2>
               <IconButton
                 icon={X}
-                title="Cerrar"
+                title="Close"
                 onClick={() => setConflictDialog(false)}
               />
             </div>
             <p className="modal-description">
-              Tus cambios siguen en esta ventana. Descarga una copia antes de
-              releer la versión del disco; al releer se reemplazan los cambios
-              locales de esta imagen.
+              Your changes are still in this window. Download a copy before
+              reloading from disk. Reloading replaces local changes to this
+              image.
             </p>
             <div className="conflict-actions">
               <button className="button secondary" onClick={downloadLocal}>
-                <Download size={15} /> Descargar copia local
+                <Download size={15} /> Download local copy
               </button>
               <button
                 className="button primary"
@@ -1895,7 +2135,7 @@ export default function App() {
                   }
                 }}
               >
-                <RotateCcw size={15} /> Releer disco
+                <RotateCcw size={15} /> Reload from disk
               </button>
             </div>
           </section>

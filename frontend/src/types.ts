@@ -37,6 +37,7 @@ export type Part = {
   box?: [number, number, number, number];
   mask?: Mask;
   seed_mask?: Mask;
+  polygon?: { vertices: XY[]; closed: boolean };
   preview?: string;
   components?: Component[];
   controls?: Component[];
@@ -62,4 +63,4 @@ export type GeometryResult = {
   preview: string;
 };
 export type ModelStatus = { state: string; device?: string; message?: string };
-export type Tool = "select" | "positive" | "negative" | "box";
+export type Tool = "select" | "positive" | "negative" | "box" | "polygon";

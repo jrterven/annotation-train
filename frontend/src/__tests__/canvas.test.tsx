@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from "@testing-library/react";
+import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import Konva from "konva";
 import CanvasEditor from "../CanvasEditor";
@@ -71,6 +71,7 @@ it("renders, updates, and removes draft point/box/mask nodes in the real Konva s
     onProposal: vi.fn(),
     onPoint: vi.fn(),
     onBox: vi.fn(),
+    onPolygon: vi.fn(),
     onGeometry: vi.fn(),
     fitRef: { current: null },
   };
@@ -114,4 +115,245 @@ it("renders, updates, and removes draft point/box/mask nodes in the real Konva s
   rerender(<CanvasEditor {...props} draft={null} />);
   expect(stage.find("Circle")).toHaveLength(0);
   expect(stage.find("Rect")).toHaveLength(1);
+});
+
+it("draws and closes a polygon in original coordinates after zooming, without emitting point prompts", () => {
+  const onPolygon = vi.fn();
+  const onPoint = vi.fn();
+  const props = {
+    image: {
+      id: 1,
+      file_name: "large.png",
+      width: 1000,
+      height: 800,
+      annotation_count: 0,
+    },
+    annotations: [],
+    proposals: [],
+    categories: [],
+    selected: null,
+    tool: "polygon" as const,
+    showMasks: true,
+    opacity: 0.4,
+    vertex: null,
+    busy: false,
+    onVertex: vi.fn(),
+    onSelect: vi.fn(),
+    onProposal: vi.fn(),
+    onPoint,
+    onBox: vi.fn(),
+    onPolygon,
+    onGeometry: vi.fn(),
+    fitRef: { current: null },
+  };
+  const { rerender } = render(<CanvasEditor {...props} draft={null} />);
+  const stage = Konva.stages.at(-1)!;
+  function clickAt(x: number, y: number) {
+    const transform = stage.findOne("Group")!.getAbsoluteTransform();
+    const screen = transform.point({ x, y });
+    act(() => {
+      stage.setPointersPositions({ clientX: screen.x, clientY: screen.y });
+      stage.fire("mousedown", { evt: { button: 0, preventDefault: vi.fn() } });
+    });
+  }
+  clickAt(123, 234);
+  expect(onPolygon).toHaveBeenLastCalledWith([[123, 234]], false);
+  const draft: Draft = {
+    id: "draft",
+    category_id: 0,
+    active_part_id: "part",
+    parts: [
+      {
+        id: "part",
+        points: [],
+        polygon: {
+          vertices: [
+            [123, 234],
+            [500, 234],
+            [500, 600],
+          ],
+          closed: false,
+        },
+      },
+    ],
+  };
+  rerender(<CanvasEditor {...props} draft={draft} />);
+  expect(stage.find(".polygon-vertex")).toHaveLength(3);
+  act(() => {
+    stage.setPointersPositions({ clientX: 400, clientY: 300 });
+    stage.fire("wheel", { evt: { deltaY: -1, preventDefault: vi.fn() } });
+  });
+  clickAt(123, 234);
+  expect(onPolygon).toHaveBeenLastCalledWith(
+    draft.parts[0].polygon!.vertices,
+    true,
+  );
+  expect(onPoint).not.toHaveBeenCalled();
+  rerender(
+    <CanvasEditor
+      {...props}
+      draft={{
+        ...draft,
+        parts: [
+          {
+            ...draft.parts[0],
+            polygon: { ...draft.parts[0].polygon!, closed: true },
+          },
+        ],
+      }}
+    />,
+  );
+  expect(stage.findOne(".polygon-prompt")!.getAttr("closed")).toBe(true);
+  const calls = onPolygon.mock.calls.length;
+  clickAt(600, 600);
+  expect(onPolygon).toHaveBeenCalledTimes(calls);
+  const handle = stage.findOne(".polygon-vertex")!;
+  for (const outside of [-20, -100]) {
+    act(() => {
+      handle.position({ x: outside, y: 200 });
+      handle.fire("dragmove", { evt: {} });
+    });
+    expect(handle.x()).toBe(0);
+  }
+  act(() => handle.fire("dragend", { evt: {} }));
+  expect(onPolygon).toHaveBeenLastCalledWith(
+    [
+      [0, 200],
+      [500, 234],
+      [500, 600],
+    ],
+    true,
+  );
+  rerender(
+    <CanvasEditor
+      {...props}
+      draft={{
+        ...draft,
+        parts: [
+          {
+            ...draft.parts[0],
+            polygon: {
+              vertices: onPolygon.mock.calls.at(-1)![0],
+              closed: true,
+            },
+          },
+        ],
+      }}
+    />,
+  );
+  expect(handle.x()).toBe(0);
+});
+
+it("outlines every mask, including holes and islands, and honors opacity and mask visibility", () => {
+  const mask = { size: [5, 6] as [number, number], counts: "032NO012>N" };
+  const components = [
+    {
+      outer: [
+        [0, 0],
+        [3, 0],
+        [3, 3],
+        [0, 3],
+      ] as [number, number][],
+      holes: [
+        [
+          [1, 1],
+          [2, 1],
+          [2, 2],
+          [1, 2],
+        ] as [number, number][],
+      ],
+    },
+    {
+      outer: [
+        [5, 4],
+        [6, 4],
+        [6, 5],
+        [5, 5],
+      ] as [number, number][],
+      holes: [],
+    },
+  ];
+  const annotation = {
+    id: "ann",
+    category_id: 1,
+    mask,
+    components,
+    iscrowd: 0,
+  };
+  const original = JSON.stringify(annotation);
+  const props = {
+    image: {
+      id: 1,
+      file_name: "islands.png",
+      width: 6,
+      height: 5,
+      annotation_count: 1,
+    },
+    annotations: [annotation],
+    proposals: [{ ...annotation, id: "proposal", selected: false, score: 0.9 }],
+    draft: {
+      id: "draft",
+      category_id: 1,
+      active_part_id: "part",
+      parts: [{ id: "part", points: [], mask, components }],
+    },
+    categories: [{ id: 1, name: "Object", color: "#06b6d4" }],
+    selected: null as string | null,
+    tool: "select" as const,
+    showMasks: true,
+    opacity: 0.65,
+    vertex: null,
+    busy: false,
+    onVertex: vi.fn(),
+    onSelect: vi.fn(),
+    onProposal: vi.fn(),
+    onPoint: vi.fn(),
+    onBox: vi.fn(),
+    onPolygon: vi.fn(),
+    onGeometry: vi.fn(),
+    fitRef: { current: null },
+  };
+  const { rerender } = render(<CanvasEditor {...props} />);
+  const stage = Konva.stages.at(-1)!;
+  expect(stage.find(".mask-outline")).toHaveLength(3);
+  expect(stage.find(".mask-outline-color")).toHaveLength(9);
+  expect(stage.find(".mask-outline-halo")).toHaveLength(9);
+  expect(
+    stage
+      .find(".mask-outline-color")
+      .slice(0, 3)
+      .map((line) => line.getAttr("points")),
+  ).toEqual([
+    components[0].outer.flat(),
+    components[0].holes[0].flat(),
+    components[1].outer.flat(),
+  ]);
+  expect(stage.find(".mask-fill").map((node) => node.opacity())).toEqual([
+    0.65,
+    0.65 * 0.85,
+    0.65 * 1.12,
+  ]);
+  expect(stage.find("Circle")).toHaveLength(0);
+  act(() => {
+    stage.setPointersPositions({ clientX: 400, clientY: 300 });
+    stage.fire("wheel", { evt: { deltaY: -1, preventDefault: vi.fn() } });
+  });
+  expect(
+    stage.findOne(".mask-outline-color")!.getAttr("strokeWidth") *
+      stage.findOne("Group")!.scaleX(),
+  ).toBeCloseTo(2);
+  expect(
+    stage.findOne(".mask-outline-halo")!.getAttr("strokeWidth") *
+      stage.findOne("Group")!.scaleX(),
+  ).toBeCloseTo(4);
+  rerender(<CanvasEditor {...props} selected="ann" opacity={0} />);
+  expect(stage.find(".mask-fill").every((node) => node.opacity() === 0)).toBe(
+    true,
+  );
+  expect(stage.find("Circle")).toHaveLength(12);
+  rerender(<CanvasEditor {...props} selected="ann" showMasks={false} />);
+  expect(stage.find(".mask-fill")).toHaveLength(0);
+  expect(stage.find(".mask-outline")).toHaveLength(0);
+  expect(stage.find("Circle")).toHaveLength(12);
+  expect(JSON.stringify(annotation)).toBe(original);
 });

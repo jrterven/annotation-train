@@ -36,35 +36,35 @@ def _json(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     except (ValueError, TypeError) as error:
-        raise ValueError("Los datos deben ser JSON válido y finito.") from error
+        raise ValueError("Data must be valid JSON with finite numbers.") from error
 
 
 def _root_path(directory: Path, image_root: str | Path) -> Path:
     root = Path(image_root).expanduser().resolve()
     if directory == root or directory.is_relative_to(root):
-        raise ValueError("El proyecto debe guardarse fuera de la carpeta de imágenes.")
+        raise ValueError("The project must be stored outside the image folder.")
     if not root.is_dir():
-        raise ValueError(f"La carpeta de imágenes no existe: {root}")
+        raise ValueError(f"Image folder does not exist: {root}")
     return root
 
 
 def _relative_file(value: Any) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise ValueError("file_name debe ser una ruta relativa no vacía.")
+        raise ValueError("file_name must be a nonempty relative path.")
     # COCO datasets produced on Windows commonly use backslash separators.
     normalized = value.replace("\\", "/")
     path = Path(normalized)
     if path.is_absolute() or re.match(r"^[a-zA-Z]:", normalized) or ".." in path.parts:
-        raise ValueError(f"La ruta debe permanecer dentro de la raíz de imágenes: {value}")
+        raise ValueError(f"The path must stay within the image root: {value}")
     return path.as_posix()
 
 
 def _file_path(root: Path, name: str) -> Path:
     path = (root / _relative_file(name)).resolve()
     if not path.is_relative_to(root):
-        raise ValueError(f"La imagen está fuera de la raíz seleccionada: {name}")
+        raise ValueError(f"The image is outside the selected root: {name}")
     if not path.is_file():
-        raise ValueError(f"No se encontró la imagen: {name}")
+        raise ValueError(f"Image not found: {name}")
     return path
 
 
@@ -74,7 +74,7 @@ def _image_details(path: Path) -> dict:
             width, height = image.size  # Deliberately do not apply EXIF transpose.
             image.verify()
         if width * height > 150_000_000:
-            raise ValueError("La imagen excede el límite de 150 megapíxeles.")
+            raise ValueError("The image exceeds the 150-megapixel limit.")
         digest = hashlib.sha256()
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -83,7 +83,7 @@ def _image_details(path: Path) -> dict:
         return {"width": width, "height": height, "sha256": digest.hexdigest(),
                 "file_size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     except (OSError, SyntaxError) as error:
-        raise ValueError(f"No se pudo leer la imagen {path.name}: {error}") from error
+        raise ValueError(f"Could not read image {path.name}: {error}") from error
 
 
 def _schema(connection: sqlite3.Connection, directory: Path, root: Path) -> None:
@@ -160,11 +160,11 @@ class ProjectStore:
         self.directory = Path(directory).expanduser().resolve()
         self.database = self.directory / DATABASE_NAME
         if not self.database.is_file():
-            raise ValueError("No existe un proyecto en esta carpeta.")
+            raise ValueError("This folder does not contain a project.")
         with self._connect() as connection:
             version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if not version or version[0] != "1":
-                raise ValueError("La versión de este proyecto no es compatible.")
+                raise ValueError("This project version is not supported.")
 
     def _connect(self):
         return _connection(self.database)
@@ -195,9 +195,11 @@ class ProjectStore:
                 if files is not None:
                     store._add_images(root, files, recursive)
             elif files is not None:
-                raise ValueError("Vuelve a vincular la carpeta de imágenes antes de agregar archivos.")
+                raise ValueError("Relink the image folder before adding files.")
             return store
-        root = _root_path(destination, image_root or destination / "imágenes")
+        if image_root is None or (isinstance(image_root, str) and not image_root.strip()):
+            raise ValueError("Select an image folder to create a project.")
+        root = _root_path(destination, image_root)
         records = cls._discover(root, files, recursive)
         destination.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix=".project.", suffix=".sqlite3", dir=destination)
@@ -217,7 +219,7 @@ class ProjectStore:
     def _discover(root: Path, files: list[str] | None, recursive: bool) -> list[tuple[str, dict]]:
         if files is not None:
             if not isinstance(files, list):
-                raise ValueError("files debe ser una lista de rutas relativas.")
+                raise ValueError("files must be a list of relative paths.")
             names = sorted({_relative_file(name) for name in files}, key=str.casefold)
         else:
             candidates: Iterable[Path] = root.rglob("*") if recursive else root.iterdir()
@@ -227,7 +229,7 @@ class ProjectStore:
         for name in names:
             path = _file_path(root, name)
             if path.suffix.lower() not in IMAGE_EXTENSIONS:
-                raise ValueError(f"Formato de imagen no compatible: {name}")
+                raise ValueError(f"Unsupported image format: {name}")
             records.append((name, _image_details(path)))
         return records
 
@@ -240,7 +242,7 @@ class ProjectStore:
             for name, details in records:
                 if name in existing:
                     if details["sha256"] != existing[name]["sha256"]:
-                        raise ValueError(f"La imagen cambió desde su importación: {name}")
+                        raise ValueError(f"The image has changed since import: {name}")
                     continue
                 _insert_image(connection, next_id, name, details)
                 next_id += 1
@@ -259,7 +261,7 @@ class ProjectStore:
     def _image_row(connection: sqlite3.Connection, image_id: int) -> sqlite3.Row:
         row = connection.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
         if row is None:
-            raise ValueError("La imagen no pertenece a este proyecto.")
+            raise ValueError("The image does not belong to this project.")
         return row
 
     def image_path(self, image_id: int) -> Path:
@@ -269,7 +271,7 @@ class ProjectStore:
         stat = path.stat()
         if (stat.st_size, stat.st_mtime_ns) != (row["file_size"], row["mtime_ns"]):
             if _image_details(path)["sha256"] != row["sha256"]:
-                raise ValueError(f"La imagen cambió desde su importación: {row['file_name']}")
+                raise ValueError(f"The image has changed since import: {row['file_name']}")
         return path
 
     def get_state(self, image_id: int) -> dict:
@@ -299,62 +301,62 @@ class ProjectStore:
         clean.pop("preview", None)
         mask = decode_mask(clean.get("mask"))
         if mask.shape != (height, width):
-            raise ValueError("La máscara no coincide con las dimensiones de la imagen.")
+            raise ValueError("The mask does not match the image dimensions.")
         if not allow_empty and not mask.any():
-            raise ValueError("No se puede guardar una segmentación vacía.")
+            raise ValueError("An empty segmentation cannot be saved.")
         clean["mask"] = encode_mask(mask)
         components = clean.get("components")
         if components is None:
             components = mask_payload(mask)["components"]
         if not np.array_equal(rasterize_components(components, width, height), mask):
-            raise ValueError("Los contornos y la máscara no coinciden; aplica primero la edición geométrica.")
+            raise ValueError("The contours and mask do not match; apply the geometry edit first.")
         clean["components"] = components
         controls = clean.get("controls")
         if controls is None:
             controls = controls_for_components(components, width, height)
         validate_components(controls, width, height)
         if mask.any() and not controls:
-            raise ValueError("Una segmentación necesita contornos editables.")
+            raise ValueError("A segmentation needs editable contours.")
         clean["controls"] = controls
         return clean
 
     def _validate_state(self, state: Any, row: sqlite3.Row, category_ids: set[int]) -> dict:
         if not isinstance(state, dict) or state.get("image_id") != row["id"]:
-            raise ValueError("El estado corresponde a otra imagen.")
+            raise ValueError("The state belongs to another image.")
         if type(state.get("revision")) is not int or state["revision"] < 0:
-            raise ValueError("La revisión del estado es inválida.")
+            raise ValueError("The state revision is invalid.")
         result = {"image_id": row["id"], "revision": state["revision"], "draft": None}
         identities = set()
         width, height = row["width"], row["height"]
 
         def identity(value: dict) -> None:
             if not isinstance(value, dict) or not isinstance(value.get("id"), str) or not value["id"]:
-                raise ValueError("Cada objeto necesita un identificador de texto.")
+                raise ValueError("Each object needs a text identifier.")
             if value["id"] in identities:
-                raise ValueError("Hay identificadores de objeto duplicados.")
+                raise ValueError("Object identifiers must be unique.")
             identities.add(value["id"])
 
         def category(value: dict) -> None:
             if type(value.get("category_id")) is not int or value["category_id"] not in category_ids:
-                raise ValueError("La categoría no pertenece a este proyecto.")
+                raise ValueError("The category does not belong to this project.")
 
         for collection in ("annotations", "proposals"):
             if not isinstance(state.get(collection, []), list):
-                raise ValueError(f"{collection} debe ser una lista.")
+                raise ValueError(f"{collection} must be a list.")
             result[collection] = []
             for annotation in state.get(collection, []):
                 identity(annotation)
                 category(annotation)
                 clean = self._mask_record(annotation, width, height)
                 if type(clean.get("iscrowd", 0)) is not int or clean.get("iscrowd", 0) not in (0, 1):
-                    raise ValueError("iscrowd debe ser 0 o 1.")
+                    raise ValueError("iscrowd must be 0 or 1.")
                 clean["iscrowd"] = clean.get("iscrowd", 0)
                 if collection == "proposals":
                     score = clean.get("score")
                     if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-                        raise ValueError("La puntuación de la propuesta no es válida.")
+                        raise ValueError("The proposal score is invalid.")
                     if not isinstance(clean.get("selected"), bool):
-                        raise ValueError("selected debe ser booleano.")
+                        raise ValueError("selected must be a boolean.")
                 result[collection].append(clean)
         draft = state.get("draft")
         if draft is not None:
@@ -362,58 +364,77 @@ class ProjectStore:
             category(draft)
             clean = copy.deepcopy(draft)
             if not isinstance(clean.get("parts"), list) or not clean["parts"]:
-                raise ValueError("El borrador necesita al menos una parte.")
+                raise ValueError("The draft needs at least one part.")
             part_ids = set()
             clean["parts"] = []
             for part in draft["parts"]:
                 if not isinstance(part, dict) or not isinstance(part.get("id"), str) or not part["id"] or part["id"] in part_ids:
-                    raise ValueError("Los identificadores de partes deben ser únicos.")
+                    raise ValueError("Part identifiers must be unique.")
                 part_ids.add(part["id"])
                 item = copy.deepcopy(part)
                 item.pop("preview", None)
                 points = item.get("points", [])
                 if not isinstance(points, list):
-                    raise ValueError("points debe ser una lista.")
+                    raise ValueError("points must be a list.")
                 for point in points:
                     if not isinstance(point, dict) or type(point.get("label")) is not int or point["label"] not in (0, 1):
-                        raise ValueError("Un prompt debe ser un punto positivo o negativo.")
+                        raise ValueError("A point prompt must be positive or negative.")
                     for axis, limit in (("x", width), ("y", height)):
                         number = point.get(axis)
                         if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or not 0 <= number < limit:
-                            raise ValueError("El punto está fuera de la imagen.")
+                            raise ValueError("The point is outside the image.")
                 if item.get("box") is not None:
                     box = item["box"]
                     if (not isinstance(box, list) or len(box) != 4 or any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) for n in box)
                             or not 0 <= box[0] < box[2] <= width or not 0 <= box[1] < box[3] <= height):
-                        raise ValueError("El bounding box está fuera de la imagen o es vacío.")
+                        raise ValueError("The bounding box is outside the image or empty.")
+                if "polygon" in item:
+                    polygon = item["polygon"]
+                    if (not isinstance(polygon, dict) or not isinstance(polygon.get("closed"), bool)
+                            or not isinstance(polygon.get("vertices"), list)):
+                        raise ValueError("The polygon needs vertices and a boolean closed value.")
+                    vertices = polygon["vertices"]
+                    if polygon["closed"] and len(vertices) < 3:
+                        raise ValueError("A closed polygon needs at least three vertices.")
+                    for vertex in vertices:
+                        if (not isinstance(vertex, list) or len(vertex) != 2
+                                or any(isinstance(n, bool) or not isinstance(n, (int, float))
+                                       or not math.isfinite(n) for n in vertex)):
+                            raise ValueError("Each polygon vertex must contain two finite numbers.")
+                        if not 0 <= vertex[0] <= width or not 0 <= vertex[1] <= height:
+                            raise ValueError("A polygon vertex is outside the image.")
+                    # A draft can be incomplete or intersect itself while being
+                    # drawn. Keep it editable; /geometry validates topology when
+                    # the user explicitly turns it into a SAM mask prompt.
+                    item["polygon"] = {"vertices": vertices, "closed": polygon["closed"]}
                 if item.get("mask") is not None:
                     item = self._mask_record(item, width, height, allow_empty=True)
                 if item.get("seed_mask") is not None:
                     seed = decode_mask(item["seed_mask"])
                     if seed.shape != (height, width):
-                        raise ValueError("La máscara inicial no coincide con la imagen.")
+                        raise ValueError("The initial mask does not match the image.")
                     item["seed_mask"] = encode_mask(seed)
                 clean["parts"].append(item)
             if clean.get("active_part_id") not in part_ids:
-                raise ValueError("La parte activa no existe en el borrador.")
+                raise ValueError("The active part does not exist in the draft.")
             result["draft"] = clean
         _json(result)
         return result
 
     def save_state(self, image_id: int, state: dict) -> dict:
         if not isinstance(state, dict):
-            raise ValueError("El estado debe ser un objeto JSON.")
+            raise ValueError("The state must be a JSON object.")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = self._image_row(connection, image_id)
             if state.get("revision") != row["revision"]:
-                raise RevisionConflict("La imagen tiene cambios más recientes. Recarga su estado antes de guardar.")
+                raise RevisionConflict("The image has newer changes. Reload its state before saving.")
             category_ids = {item[0] for item in connection.execute("SELECT id FROM categories")}
             clean = self._validate_state(state, row, category_ids)
             for annotation in clean["annotations"] + clean["proposals"]:
                 found = connection.execute("SELECT * FROM coco_ids WHERE internal_id=?", (annotation["id"],)).fetchone()
                 if found and found["image_id"] != image_id:
-                    raise ValueError("El identificador de objeto pertenece a otra imagen.")
+                    raise ValueError("The object identifier belongs to another image.")
                 if not found:
                     coco_id = connection.execute("SELECT COALESCE(MAX(coco_id),0)+1 FROM coco_ids").fetchone()[0]
                     connection.execute("INSERT INTO coco_ids VALUES(?,?,?)", (annotation["id"], coco_id, image_id))
@@ -428,7 +449,7 @@ class ProjectStore:
             for row in connection.execute("SELECT * FROM images").fetchall():
                 details = _image_details(_file_path(root, row["file_name"]))
                 if (details["width"], details["height"], details["sha256"]) != (row["width"], row["height"], row["sha256"]):
-                    raise ValueError(f"La imagen no coincide con el original: {row['file_name']}")
+                    raise ValueError(f"The image does not match the original: {row['file_name']}")
                 connection.execute("UPDATE images SET file_size=?,mtime_ns=? WHERE id=?", (details["file_size"], details["mtime_ns"], row["id"]))
             connection.execute("UPDATE meta SET value=? WHERE key='image_root'", (_root_reference(root, self.directory),))
         return self.project()
@@ -436,9 +457,9 @@ class ProjectStore:
     @staticmethod
     def _category_fields(name: Any, color: Any) -> tuple[str, str]:
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 160:
-            raise ValueError("La clase necesita un nombre de entre 1 y 160 caracteres.")
+            raise ValueError("The class name must contain 1 to 160 characters.")
         if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
-            raise ValueError("El color debe tener formato #RRGGBB.")
+            raise ValueError("The color must use #RRGGBB format.")
         return name.strip(), color.upper()
 
     def add_category(self, name: str, color: str) -> dict:
@@ -447,7 +468,7 @@ class ProjectStore:
             connection.execute("BEGIN IMMEDIATE")
             existing = [json.loads(row[0]) for row in connection.execute("SELECT data FROM categories")]
             if any(category["name"].casefold() == name.casefold() for category in existing):
-                raise ValueError("Ya existe una clase con ese nombre.")
+                raise ValueError("A class with this name already exists.")
             identity = max([category["id"] for category in existing] + [0]) + 1
             category = {"id": identity, "name": name, "color": color, "supercategory": ""}
             connection.execute("INSERT INTO categories VALUES(?,?)", (identity, _json(category)))
@@ -455,18 +476,18 @@ class ProjectStore:
 
     def update_category(self, id: int, updates: dict) -> dict:
         if not isinstance(updates, dict) or set(updates) - {"name", "color"}:
-            raise ValueError("Solo se puede cambiar el nombre o color de una clase.")
+            raise ValueError("Only a class name or color can be changed.")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT data FROM categories WHERE id=?", (id,)).fetchone()
             if row is None:
-                raise ValueError("La clase no existe.")
+                raise ValueError("The class does not exist.")
             category = json.loads(row[0])
             category.update(updates)
             category["name"], category["color"] = self._category_fields(category["name"], category["color"])
             for other in connection.execute("SELECT data FROM categories WHERE id<>?", (id,)):
                 if json.loads(other[0])["name"].casefold() == category["name"].casefold():
-                    raise ValueError("Ya existe una clase con ese nombre.")
+                    raise ValueError("A class with this name already exists.")
             connection.execute("UPDATE categories SET data=? WHERE id=?", (_json(category), id))
         return category
 
@@ -474,24 +495,24 @@ class ProjectStore:
     def import_coco(cls, directory: str | Path, image_root: str | Path, json_path: str | Path) -> "ProjectStore":
         destination = Path(directory).expanduser().resolve()
         if (destination / DATABASE_NAME).exists():
-            raise ValueError("Importa COCO en un proyecto nuevo; no se fusionan proyectos existentes.")
+            raise ValueError("Import COCO into a new project; existing projects cannot be merged.")
         root = _root_path(destination, image_root)
         try:
             source_text = Path(json_path).expanduser().read_text(encoding="utf-8-sig")
             source = json.loads(source_text)
         except (OSError, ValueError) as error:
-            raise ValueError(f"No se pudo leer el JSON COCO: {error}") from error
+            raise ValueError(f"Could not read the COCO JSON: {error}") from error
         if not isinstance(source, dict) or any(not isinstance(source.get(key), list) for key in ("images", "annotations", "categories")):
-            raise ValueError("Se necesita un COCO de instancias con images, annotations y categories.")
+            raise ValueError("An instance COCO dataset with images, annotations, and categories is required.")
         _json(source)
 
         def indexed(items: list, label: str) -> dict[int, dict]:
             result = {}
             for item in items:
                 if not isinstance(item, dict) or type(item.get("id")) is not int:
-                    raise ValueError(f"Cada elemento de {label} debe tener un ID entero.")
+                    raise ValueError(f"Each item in {label} must have an integer ID.")
                 if item["id"] in result:
-                    raise ValueError(f"ID duplicado en {label}: {item['id']}")
+                    raise ValueError(f"Duplicate ID in {label}: {item['id']}")
                 result[item["id"]] = item
             return result
 
@@ -511,20 +532,20 @@ class ProjectStore:
         for image_id, image in images.items():
             name = _relative_file(image.get("file_name"))
             if name in file_names:
-                raise ValueError(f"Dos registros COCO apuntan a la misma imagen: {name}")
+                raise ValueError(f"Two COCO records reference the same image: {name}")
             file_names.add(name)
             details = _image_details(_file_path(root, name))
             if type(image.get("width")) is not int or type(image.get("height")) is not int or (image["width"], image["height"]) != (details["width"], details["height"]):
-                raise ValueError(f"Las dimensiones COCO no coinciden con la imagen: {name}")
+                raise ValueError(f"The COCO dimensions do not match the image: {name}")
             image_records[image_id] = (name, details, _initial_state(image_id))
         source_annotations = []
         for coco_id, annotation in annotations.items():
             image_id, category_id = annotation.get("image_id"), annotation.get("category_id")
             if type(image_id) is not int or image_id not in images or type(category_id) is not int or category_id not in categories:
-                raise ValueError(f"La anotación {coco_id} referencia una imagen o clase inexistente.")
+                raise ValueError(f"Annotation {coco_id} references an unknown image or class.")
             crowd = annotation.get("iscrowd", 0)
             if type(crowd) is not int or crowd not in (0, 1):
-                raise ValueError(f"iscrowd inválido en la anotación {coco_id}.")
+                raise ValueError(f"Invalid iscrowd value in annotation {coco_id}.")
             _, details, state = image_records[image_id]
             height, width = details["height"], details["width"]
             segmentation = annotation.get("segmentation")
@@ -535,17 +556,17 @@ class ProjectStore:
                     for polygon in segmentation:
                         if (not isinstance(polygon, list) or len(polygon) < 6 or len(polygon) % 2
                                 or any(isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) for number in polygon)):
-                            raise ValueError("Polígono COCO inválido.")
+                            raise ValueError("Invalid COCO polygon.")
                     encoded = coco_mask.merge(coco_mask.frPyObjects(segmentation, height, width))
                     mask = np.asarray(coco_mask.decode(encoded), dtype=bool)
                 else:
-                    raise ValueError("Falta una segmentación compatible; no se convierten cajas en máscaras.")
+                    raise ValueError("A supported segmentation is required; boxes are not converted to masks.")
                 if mask.shape != (height, width) or not mask.any():
-                    raise ValueError("La máscara es vacía o tiene dimensiones incorrectas.")
+                    raise ValueError("The mask is empty or has incorrect dimensions.")
                 payload = mask_payload(mask)
                 payload.pop("preview")
             except Exception as error:
-                raise ValueError(f"Anotación {coco_id}: {error}") from error
+                raise ValueError(f"Annotation {coco_id}: {error}") from error
             identity = str(uuid.uuid4())
             state["annotations"].append({"id": identity, "category_id": category_id, "iscrowd": crowd, **payload})
             source_annotations.append((identity, coco_id, image_id, annotation, payload["mask"]))
@@ -576,7 +597,7 @@ class ProjectStore:
         with self._connect() as connection:
             connection.execute("BEGIN")
             output = json.loads(connection.execute("SELECT value FROM meta WHERE key='coco_metadata'").fetchone()[0])
-            output.setdefault("info", {"description": "Segmentaciones", "version": "1.0"})
+            output.setdefault("info", {"description": "Segmentations", "version": "1.0"})
             output.setdefault("licenses", [])
             output["categories"] = [{key: value for key, value in json.loads(row[0]).items() if key != "color"}
                                     for row in connection.execute("SELECT data FROM categories ORDER BY id")]

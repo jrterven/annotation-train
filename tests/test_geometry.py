@@ -6,7 +6,7 @@ from PIL import Image
 from pycocotools import mask as coco_mask
 import pytest
 
-from app.geometry import decode_mask, encode_mask, mask_payload, rasterize_components, union_masks, validate_components
+from app.geometry import decode_mask, encode_mask, fill_small_holes, mask_payload, rasterize_components, union_masks, validate_components
 
 
 def test_rle_roundtrip_matches_official_decoder():
@@ -170,3 +170,100 @@ def test_control_topology_valid_for_disconnected_and_nested_shapes():
         assert len(payload["controls"]) == len(payload["components"])
         assert sorted(len(c["holes"]) for c in payload["controls"]) == sorted(len(c["holes"]) for c in payload["components"])
         assert np.array_equal(decode_mask(payload["mask"]), mask)
+
+
+def test_fill_small_holes_changes_only_qualifying_background_pixels():
+    mask = np.zeros((40, 60), dtype=bool)
+    mask[2:36, 2:50] = True
+    mask[5:9, 5:9] = False  # Exactly 16 pixels.
+    mask[15, 10:27] = False  # 17 pixels: retain this hole.
+    mask[20, 40] = False
+    mask[2:5, 30] = False  # An opening connected to the exterior.
+    mask[38, 58] = True  # Keep a one-pixel foreground island.
+    original = mask.copy()
+    expected = mask.copy()
+    expected[5:9, 5:9] = True
+    expected[20, 40] = True
+    cleaned, holes, pixels = fill_small_holes(mask)
+    assert holes == 2 and pixels == 17
+    assert np.array_equal(cleaned, expected)
+    assert np.array_equal(mask, original)
+    payload = mask_payload(cleaned)
+    assert np.array_equal(decode_mask(payload["mask"]), expected)
+    assert np.array_equal(coco_mask.decode(payload["mask"]), expected)
+    assert np.array_equal(rasterize_components(payload["components"], 60, 40), expected)
+    validate_components(payload["controls"], 60, 40)
+
+
+def test_hole_area_excludes_foreground_islands_inside_it():
+    mask = np.zeros((17, 17), dtype=bool)
+    mask[1:16, 1:16] = True
+    mask[5:8, 5:8] = False
+    mask[6, 6] = True  # The surrounding background region has 8, not 9 pixels.
+    mask[10:14, 10:14] = False
+    mask[11, 11] = True  # This surrounding region has 15 pixels, so retain it.
+    expected = mask.copy()
+    expected[5:8, 5:8] = True
+    cleaned, holes, pixels = fill_small_holes(mask, max_area=8)
+    assert holes == 1 and pixels == 8
+    assert np.array_equal(cleaned, expected)
+
+
+def test_hole_cleanup_uses_four_connected_background_and_preserves_image_edges():
+    mask = np.ones((8, 8), dtype=bool)
+    mask[0, 0] = mask[1, 1] = mask[2, 2] = False
+    mask[0:2, 6] = False  # A small edge-connected void is never filled.
+    expected = mask.copy()
+    expected[1, 1] = expected[2, 2] = True
+    cleaned, holes, pixels = fill_small_holes(mask, max_area=2)
+    assert holes == 2 and pixels == 2
+    assert np.array_equal(cleaned, expected)
+
+
+@pytest.mark.parametrize("max_area", [0, -1, True, 1.0, "16", 150_000_001])
+def test_hole_cleanup_rejects_invalid_area_limits(max_area):
+    with pytest.raises(ValueError, match="integer"):
+        fill_small_holes(np.ones((3, 3), dtype=bool), max_area)
+
+
+@pytest.mark.parametrize("fill", [False, True])
+def test_hole_cleanup_without_holes_is_an_exact_noop(fill):
+    mask = np.full((5, 7), fill, dtype=bool)
+    cleaned, holes, pixels = fill_small_holes(mask)
+    assert np.array_equal(cleaned, mask)
+    assert cleaned is not mask
+    assert holes == pixels == 0
+
+
+def test_hole_cleanup_matches_independent_pixel_flood_fill():
+    random = np.random.default_rng(23)
+    for _ in range(25):
+        mask = random.random((9, 12)) > 0.45
+        limit = int(random.integers(1, 8))
+        expected = mask.copy()
+        seen = set()
+        expected_holes = expected_pixels = 0
+        for y, x in np.argwhere(~mask):
+            point = (int(y), int(x))
+            if point in seen:
+                continue
+            pending = [point]
+            region = set()
+            while pending:
+                row, column = pending.pop()
+                if (row, column) in seen:
+                    continue
+                seen.add((row, column))
+                region.add((row, column))
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ny, nx = row + dy, column + dx
+                    if 0 <= ny < 9 and 0 <= nx < 12 and not mask[ny, nx] and (ny, nx) not in seen:
+                        pending.append((ny, nx))
+            if len(region) <= limit and all(0 < row < 8 and 0 < column < 11 for row, column in region):
+                expected_holes += 1
+                expected_pixels += len(region)
+                for row, column in region:
+                    expected[row, column] = True
+        cleaned, holes, pixels = fill_small_holes(mask, limit)
+        assert np.array_equal(cleaned, expected)
+        assert (holes, pixels) == (expected_holes, expected_pixels)

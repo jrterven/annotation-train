@@ -12,10 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def main():
     if sys.version_info[:2] != (3, 12):
-        raise SystemExit("Ejecuta este instalador con Python 3.12: python3.12 scripts/setup.py")
+        raise SystemExit("Run this installer with Python 3.12: python3.12 scripts/setup.py")
     npm = shutil.which("npm")
     if not npm:
-        raise SystemExit("Instala Node.js 22.x (desde 22.13), 24.x o 26 en adelante, y npm antes de continuar.")
+        raise SystemExit("Install Node.js 22.x (22.13 or newer), 24.x or 26+, and npm before continuing.")
     env = ROOT / ".venv"
     python = env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.is_file():
@@ -23,7 +23,7 @@ def main():
     subprocess.run([str(python), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")], check=True, cwd=ROOT)
     subprocess.run([npm, "ci"], check=True, cwd=ROOT / "frontend")
     subprocess.run([npm, "run", "build"], check=True, cwd=ROOT / "frontend")
-    print("\nInstalación terminada. Inicia con: python3 run.py")
+    print("\nInstallation complete. Start with: python3 run.py")
 
 
 if __name__ == "__main__":

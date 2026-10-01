@@ -70,23 +70,22 @@ export function FileBrowser({
         className="modal file-browser"
         role="dialog"
         aria-modal="true"
-        aria-label="Explorador de archivos"
+        aria-label="File browser"
       >
         <div className="modal-heading">
           <div>
-            <span className="eyebrow">EN ESTE EQUIPO</span>
             <h2>
               {kind === "directory"
-                ? "Selecciona una carpeta"
+                ? "Select a folder"
                 : kind === "json"
-                  ? "Selecciona COCO JSON"
-                  : "Selecciona imágenes"}
+                  ? "Select COCO JSON"
+                  : "Select images"}
             </h2>
           </div>
           <button
             className="icon-button"
             onClick={onCancel}
-            aria-label="Cerrar explorador"
+            aria-label="Close file browser"
           >
             <X size={19} />
           </button>
@@ -103,16 +102,16 @@ export function FileBrowser({
             className="icon-button"
             disabled={!data?.parent || loading}
             onClick={() => data?.parent && void browse(data.parent)}
-            title="Carpeta superior"
+            title="Parent folder"
           >
             <ArrowUp size={17} />
           </button>
           <input
-            aria-label="Ruta de carpeta"
+            aria-label="Folder path"
             value={path}
             onChange={(e) => setPath(e.target.value)}
           />
-          <button type="submit" className="icon-button" title="Ir a la ruta">
+          <button type="submit" className="icon-button" title="Go to path">
             <ChevronRight size={18} />
           </button>
         </form>
@@ -159,7 +158,7 @@ export function FileBrowser({
                   </button>
                 ))}
               {!data.directories.length && !data.files.length && (
-                <div className="empty-panel">Esta carpeta está vacía.</div>
+                <div className="empty-panel">This folder is empty.</div>
               )}
             </>
           )}
@@ -168,10 +167,10 @@ export function FileBrowser({
         <footer className="modal-footer">
           <span className="muted">
             {kind === "images"
-              ? `${selected.length} seleccionadas`
+              ? `${selected.length} selected`
               : kind === "directory"
-                ? "Elige la carpeta actual."
-                : "Formato de segmentación COCO."}
+                ? "Select the current folder."
+                : "COCO segmentation format."}
           </span>
           <button
             className="button primary"
@@ -187,7 +186,7 @@ export function FileBrowser({
               )
             }
           >
-            {kind === "directory" ? "Usar carpeta" : "Seleccionar"}
+            {kind === "directory" ? "Use folder" : "Select"}
             <Check size={16} />
           </button>
         </footer>
@@ -221,7 +220,7 @@ export function ProjectDialog({
         mode === "import"
           ? await api<Project>("/coco/import", "POST", {
               directory,
-              image_root: imageRoot || `${directory}/imágenes`,
+              image_root: imageRoot,
               json_path: jsonPath,
             })
           : await api<Project>("/projects/open", "POST", {
@@ -243,14 +242,13 @@ export function ProjectDialog({
         className="modal project-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Abrir proyecto"
+        aria-label="Open project"
       >
         <div className="modal-heading">
           <div>
-            <span className="eyebrow">TU ESPACIO DE TRABAJO</span>
-            <h2>Todo empieza con una imagen.</h2>
+            <h2>Project</h2>
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="Cerrar">
+          <button className="icon-button" onClick={onClose} aria-label="Close">
             <X size={19} />
           </button>
         </div>
@@ -259,13 +257,13 @@ export function ProjectDialog({
             className={mode === "open" ? "active" : ""}
             onClick={() => setMode("open")}
           >
-            Crear / abrir proyecto
+            Create / open project
           </button>
           <button
             className={mode === "import" ? "active" : ""}
             onClick={() => setMode("import")}
           >
-            Importar COCO
+            Import COCO
           </button>
         </div>
         <form
@@ -275,12 +273,12 @@ export function ProjectDialog({
           }}
         >
           <label className="field-label" htmlFor="project-directory">
-            Carpeta del proyecto <span>Anotaciones y configuración</span>
+            Project folder <span>Annotations and settings</span>
           </label>
           <div className="input-browse">
             <input
               id="project-directory"
-              placeholder="/ruta/a/mi-proyecto"
+              placeholder="/path/to/project"
               value={directory}
               onChange={(e) => setDirectory(e.target.value)}
               required
@@ -288,24 +286,20 @@ export function ProjectDialog({
             <button
               type="button"
               className="icon-button"
-              title="Explorar carpeta del proyecto"
+              title="Browse project folder"
               onClick={() => setBrowser("project")}
             >
               <FolderOpen size={18} />
             </button>
           </div>
           <label className="field-label" htmlFor="image-root">
-            Carpeta de imágenes{" "}
-            <span>Los originales permanecen en su lugar</span>
+            Image folder
           </label>
           <div className="input-browse">
             <input
               id="image-root"
-              placeholder={
-                directory
-                  ? `${directory}/imágenes`
-                  : "Por defecto: proyecto/imágenes"
-              }
+              placeholder={directory || "Select an image folder"}
+              required={mode === "import"}
               value={imageRoot}
               onChange={(e) => {
                 setImageRoot(e.target.value);
@@ -315,14 +309,14 @@ export function ProjectDialog({
             <button
               type="button"
               className="icon-button"
-              title="Explorar carpeta de imágenes"
+              title="Browse image folder"
               onClick={() => setBrowser("images")}
             >
               <FolderOpen size={18} />
             </button>
           </div>
           <p className="field-note">
-            Guarda el proyecto fuera de la carpeta de imágenes.
+            Keep the project outside the image folder.
           </p>
           {mode === "open" ? (
             <div className="selection-settings">
@@ -333,17 +327,17 @@ export function ProjectDialog({
                   onChange={(e) => setRecursive(e.target.checked)}
                   disabled={!!files}
                 />{" "}
-                Incluir subcarpetas
+                Include subfolders
               </label>
               <button
                 type="button"
                 className="text-button"
-                disabled={!imageRoot && !directory}
+                disabled={!imageRoot}
                 onClick={() => setBrowser("selection")}
               >
                 {files
-                  ? `${files.length} imágenes elegidas`
-                  : "Elegir imágenes individuales"}
+                  ? `${files.length} images selected`
+                  : "Select individual images"}
               </button>
               {files && (
                 <button
@@ -351,27 +345,27 @@ export function ProjectDialog({
                   type="button"
                   onClick={() => setFiles(undefined)}
                 >
-                  Usar todas
+                  Use all
                 </button>
               )}
             </div>
           ) : (
             <>
               <label className="field-label" htmlFor="json-file">
-                Anotaciones COCO <span>Se importan a un proyecto nuevo</span>
+                COCO annotations <span>Import into a new project</span>
               </label>
               <div className="input-browse">
                 <input
                   id="json-file"
                   value={jsonPath}
                   onChange={(e) => setJsonPath(e.target.value)}
-                  placeholder="/ruta/anotaciones.json"
+                  placeholder="/path/annotations.json"
                   required
                 />
                 <button
                   type="button"
                   className="icon-button"
-                  title="Seleccionar archivo COCO"
+                  title="Select COCO file"
                   onClick={() => setBrowser("json")}
                 >
                   <FileJson size={18} />
@@ -386,7 +380,7 @@ export function ProjectDialog({
               className="button secondary"
               onClick={onClose}
             >
-              <ArrowLeft size={16} /> Volver
+              <ArrowLeft size={16} /> Back
             </button>
             <button className="button primary" disabled={busy || !directory}>
               {busy ? (
@@ -394,20 +388,14 @@ export function ProjectDialog({
               ) : (
                 <FolderOpen size={17} />
               )}{" "}
-              {busy ? "Abriendo…" : "Abrir proyecto"}
+              {busy ? "Opening…" : "Open project"}
             </button>
           </footer>
         </form>
       </section>
       {browser && (
         <FileBrowser
-          initial={
-            browser === "project"
-              ? directory
-              : browser === "json"
-                ? imageRoot
-                : imageRoot || `${directory}/imágenes`
-          }
+          initial={browser === "project" ? directory : imageRoot || directory}
           kind={
             browser === "json"
               ? "json"
@@ -432,9 +420,7 @@ export function ProjectDialog({
                 (p) => !comparable(p).startsWith(`${comparable(root)}/`),
               );
               if (outside) {
-                setError(
-                  "Selecciona archivos dentro de la carpeta de imágenes indicada.",
-                );
+                setError("Select files within the chosen image folder.");
               } else {
                 setImageRoot(initialRoot);
                 setFiles(normalizedPaths.map((p) => p.slice(root.length + 1)));

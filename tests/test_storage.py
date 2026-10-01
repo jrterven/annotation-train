@@ -48,7 +48,7 @@ def test_project_keeps_images_external_and_selected_files(tmp_path):
     assert data["image_root"] == str(root)
     assert not list(store.directory.rglob("*.png"))
     assert store.get_state(data["images"][0]["id"])["revision"] == 0
-    with pytest.raises(ValueError, match="fuera"):
+    with pytest.raises(ValueError, match="outside"):
         ProjectStore.open(root / "nested" / "labels", root)
 
 
@@ -77,7 +77,7 @@ def test_invalid_update_is_atomic(project):
     assert project.get_state(1) == before
     invalid["annotations"] = [annotation()]
     invalid["annotations"][0]["components"] = []
-    with pytest.raises(ValueError, match="no coinciden"):
+    with pytest.raises(ValueError, match="do not match"):
         project.save_state(1, invalid)
     assert project.get_state(1) == before
 
@@ -114,6 +114,62 @@ def test_draft_and_proposals_persist_separately_and_do_not_export(project):
     assert json.loads(project.export_coco().read_text())["annotations"] == []
 
 
+@pytest.mark.parametrize("vertices,closed", [
+    ([], False), ([[0, 0]], False), ([[0, 0], [12, 8]], False),
+    ([[0, 0], [12, 0], [12, 8], [0, 8]], True),
+])
+def test_polygon_draft_reopens_without_becoming_an_annotation(project, vertices, closed):
+    state = project.get_state(1)
+    polygon = {"vertices": vertices, "closed": closed}
+    state["draft"] = {"id": "polygon-draft", "category_id": 1, "active_part_id": "part",
+                      "parts": [{"id": "part", "points": [], "polygon": polygon}]}
+    project.save_state(1, state)
+    reopened = ProjectStore.open(project.directory)
+    restored = reopened.get_state(1)
+    assert restored["draft"]["parts"] == state["draft"]["parts"]
+    assert restored["annotations"] == []
+    assert json.loads(reopened.export_coco().read_text())["annotations"] == []
+
+
+def test_refined_polygon_preserves_input_separately_from_output_and_clicks(project):
+    state = project.get_state(1)
+    polygon = {"vertices": [[1.5, 1], [11, 1], [11, 7.5], [1, 7]], "closed": True}
+    seed = np.ones((8, 12), dtype=bool)
+    prediction = annotation()
+    part = {"id": "part", "points": [{"x": 3, "y": 3, "label": 0}], "polygon": polygon,
+            "seed_mask": encode_mask(seed), **{k: prediction[k] for k in ("mask", "components")}}
+    state["draft"] = {"id": "polygon-draft", "category_id": 1, "active_part_id": "part", "parts": [part]}
+    project.save_state(1, state)
+    restored = ProjectStore.open(project.directory).get_state(1)["draft"]["parts"][0]
+    assert restored["polygon"] == polygon
+    assert restored["points"] == part["points"]
+    assert np.array_equal(decode_mask(restored["seed_mask"]), seed)
+    assert np.array_equal(decode_mask(restored["mask"]), decode_mask(prediction["mask"]))
+    assert not np.array_equal(decode_mask(restored["mask"]), seed)
+
+
+@pytest.mark.parametrize("polygon", [
+    None, [], {}, {"vertices": [], "closed": "false"}, {"vertices": None, "closed": False},
+    {"vertices": [[1, 1], [2, 2]], "closed": True},
+    {"vertices": [[1]], "closed": False}, {"vertices": [[1, 2, 3]], "closed": False},
+    {"vertices": [[True, 1]], "closed": False}, {"vertices": [["1", 1]], "closed": False},
+    {"vertices": [[float("nan"), 1]], "closed": False},
+    {"vertices": [[1, float("inf")]], "closed": False},
+    {"vertices": [[-0.1, 1]], "closed": False}, {"vertices": [[12.01, 1]], "closed": False},
+    {"vertices": [[1, 8.01]], "closed": False},
+])
+def test_malformed_polygon_does_not_overwrite_saved_draft(project, polygon):
+    state = project.get_state(1)
+    state["draft"] = {"id": "polygon-draft", "category_id": 1, "active_part_id": "part",
+                      "parts": [{"id": "part", "points": [], "polygon": {"vertices": [[1, 2]], "closed": False}}]}
+    saved = project.save_state(1, state)
+    invalid = copy.deepcopy(saved)
+    invalid["draft"]["parts"][0]["polygon"] = polygon
+    with pytest.raises(ValueError):
+        project.save_state(1, invalid)
+    assert project.get_state(1) == saved
+
+
 def test_coco_ids_stable_across_delete_undo_and_new_objects(project):
     state = project.get_state(1)
     first = annotation()
@@ -135,7 +191,7 @@ def test_annotation_id_cannot_move_to_another_image(project):
     project.save_state(1, state)
     other = project.get_state(2)
     other["annotations"] = [item]
-    with pytest.raises(ValueError, match="otra imagen"):
+    with pytest.raises(ValueError, match="another image"):
         project.save_state(2, other)
 
 
@@ -149,10 +205,28 @@ def test_project_moves_without_moving_external_originals(project, tmp_path):
     assert moved.project()["image_root"] == str(root)
 
 
-def test_project_with_internal_images_can_move_together(tmp_path):
+@pytest.mark.parametrize("image_root", [None, "", "   "])
+def test_new_project_requires_explicit_image_root_without_partial_creation(tmp_path, image_root):
+    directory = tmp_path / "new-project"
+    with pytest.raises(ValueError, match="Select an image folder"):
+        ProjectStore.open(directory, image_root=image_root)
+    assert not directory.exists()
+    # Even a folder matching the old default is never selected implicitly.
+    make_image(directory / "imágenes" / "a.png")
+    with pytest.raises(ValueError, match="Select an image folder"):
+        ProjectStore.open(directory, image_root=image_root)
+    assert not (directory / DATABASE_NAME).exists()
+    assert not list(directory.glob(".project.*"))
+
+
+def test_legacy_internal_image_root_reopens_and_moves_without_explicit_root(tmp_path):
     directory = tmp_path / "bundle"
     make_image(directory / "imágenes" / "a.png")
-    store = ProjectStore.open(directory)
+    store = ProjectStore.open(directory, directory / "imágenes")
+    with sqlite3.connect(store.database) as connection:
+        assert connection.execute("SELECT value FROM meta WHERE key='image_root'").fetchone()[0] == "imágenes"
+    reopened = ProjectStore.open(directory)
+    assert reopened.image_path(1) == directory / "imágenes" / "a.png"
     moved_directory = tmp_path / "moved"
     shutil.move(str(store.directory), moved_directory)
     moved = ProjectStore.open(moved_directory)
@@ -178,7 +252,7 @@ def test_relink_requires_exact_originals_and_rolls_back(project, tmp_path):
     wrong = tmp_path / "wrong"
     shutil.copytree(replacement, wrong)
     make_image(wrong / "sub" / "b.png", color="red")
-    with pytest.raises(ValueError, match="no coincide"):
+    with pytest.raises(ValueError, match="does not match"):
         project.relink(wrong)
     assert project.project()["image_root"] == str(replacement)
 
@@ -186,9 +260,9 @@ def test_relink_requires_exact_originals_and_rolls_back(project, tmp_path):
 def test_modified_original_is_detected(project):
     root = Path(project.project()["image_root"])
     make_image(root / "a.png", color="blue")
-    with pytest.raises(ValueError, match="cambió"):
+    with pytest.raises(ValueError, match="changed"):
         project.image_path(1)
-    with pytest.raises(ValueError, match="cambió"):
+    with pytest.raises(ValueError, match="changed"):
         ProjectStore.open(project.directory)
 
 
@@ -279,7 +353,7 @@ def test_invalid_import_never_creates_partial_project(tmp_path, corruption):
 
 def test_coco_project_does_not_merge_over_existing(project, tmp_path):
     root, source, _ = make_coco(tmp_path)
-    with pytest.raises(ValueError, match="proyecto nuevo"):
+    with pytest.raises(ValueError, match="new project"):
         ProjectStore.import_coco(project.directory, root, source)
 
 
@@ -317,7 +391,7 @@ def test_invalid_controls_rejected_without_touching_saved_state(project):
     item = annotation()
     item["controls"] = [{"outer": [[0, 0], [6, 6], [0, 6], [6, 0]], "holes": []}]
     state["annotations"] = [item]
-    with pytest.raises(ValueError, match="Polígono inválido"):
+    with pytest.raises(ValueError, match="Invalid polygon"):
         project.save_state(1, state)
     assert project.get_state(1)["revision"] == 0
 

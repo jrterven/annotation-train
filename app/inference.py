@@ -42,7 +42,7 @@ def _is_mps_unsupported(error: Exception) -> bool:
 
 def _safe_error(error: Exception) -> str:
     # Never echo an authentication token, including tokens embedded in HTTP errors.
-    return re.sub(r"hf_[A-Za-z0-9]+", "[token oculto]", str(error)).split("\n")[0][:300]
+    return re.sub(r"hf_[A-Za-z0-9]+", "[token redacted]", str(error)).split("\n")[0][:300]
 
 
 class Sam3Engine:
@@ -60,14 +60,14 @@ class Sam3Engine:
         self._status_lock = threading.Lock()
         self.requested_device = device or os.environ.get("SAM3_DEVICE", "auto")
         if self.requested_device not in {"auto", "mps", "cpu", "cuda"}:
-            raise ValueError("SAM3_DEVICE debe ser auto, mps, cuda o cpu.")
+            raise ValueError("SAM3_DEVICE must be auto, mps, cuda, or cpu.")
         self.model_id = "facebook/sam3"
         self.revision = revision or os.environ.get("SAM3_REVISION") or DEFAULT_MODEL_REVISION
         self.cache_size = max(1, min(int(cache_size), 8))
         self.confidence_threshold = float(confidence_threshold)
         if not 0 < self.confidence_threshold < 1:
-            raise ValueError("El umbral de confianza debe estar entre 0 y 1.")
-        self._status = {"state": "unloaded", "device": None, "message": "SAM 3 aún no está cargado."}
+            raise ValueError("The confidence threshold must be between 0 and 1.")
+        self._status = {"state": "unloaded", "device": None, "message": "SAM 3 is not loaded."}
         self._torch = None
         self._detector = self._tracker = None
         self._detector_processor = self._tracker_processor = None
@@ -102,16 +102,16 @@ class Sam3Engine:
                 return "mps"
             return "cpu"
         if self.requested_device == "cuda" and not torch.cuda.is_available():
-            raise ModelUnavailable("CUDA no está disponible en este equipo.")
+            raise ModelUnavailable("CUDA is not available on this computer.")
         if self.requested_device == "mps" and not torch.backends.mps.is_available():
-            raise ModelUnavailable("Metal/MPS no está disponible en este equipo.")
+            raise ModelUnavailable("Metal/MPS is not available on this computer.")
         return self.requested_device
 
     def load(self) -> dict:
         with self.lock:
             if self.status()["state"] == "ready":
                 return self.status()
-            self._set_status("loading", "Cargando SAM 3 y su predictor interactivo…")
+            self._set_status("loading", "Loading SAM 3 and its interactive predictor…")
             started = time.perf_counter()
             try:
                 import torch
@@ -141,7 +141,7 @@ class Sam3Engine:
                 self._release_models()
                 self._set_status(
                     "missing_dependencies",
-                    "Instala requirements.txt en Python 3.12 para usar SAM 3. " + _safe_error(error),
+                    "Install requirements.txt with Python 3.12 to use SAM 3. " + _safe_error(error),
                 )
             except Exception as error:
                 self._release_models()
@@ -151,19 +151,19 @@ class Sam3Engine:
                 ):
                     self._set_status(
                         "auth_required",
-                        "Autoriza facebook/sam3 en Hugging Face y ejecuta hf auth login en la terminal.",
+                        "Request access to facebook/sam3 on Hugging Face and run hf auth login in a terminal.",
                     )
                 else:
-                    self._set_status("error", "No se pudo cargar SAM 3. " + _safe_error(error))
+                    self._set_status("error", "Could not load SAM 3. " + _safe_error(error))
             result = self.status()
             if result["state"] != "ready":
                 raise ModelUnavailable(result["message"])
             return result
 
     def _ready_status(self) -> None:
-        message = f"SAM 3 listo · {self._device.upper()}"
+        message = f"SAM 3 ready · {self._device.upper()}"
         if self._fallback_reason:
-            message += ". Se usa CPU porque una operación no es compatible con Metal."
+            message += ". Using CPU because an operation is not supported by Metal."
         self._set_status("ready", message)
 
     def _clear_caches(self) -> None:
@@ -201,7 +201,7 @@ class Sam3Engine:
                     self._fallback_to_cpu(error)
                     with self._torch.inference_mode():
                         return operation()
-                raise ModelUnavailable("SAM 3 no pudo procesar esta imagen. " + _safe_error(error)) from error
+                raise ModelUnavailable("SAM 3 could not process this image. " + _safe_error(error)) from error
 
     @staticmethod
     def _put(cache: OrderedDict, key: Any, value: Any, limit: int) -> None:
@@ -252,35 +252,35 @@ class Sam3Engine:
     @staticmethod
     def _validate_part(part: dict, width: int, height: int) -> tuple:
         if not isinstance(part, dict):
-            raise ValueError("La parte debe contener puntos, caja o máscara inicial.")
+            raise ValueError("The part must contain points, a box, or an initial mask.")
         points = []
         raw_points = part.get("points") or []
         if not isinstance(raw_points, list) or len(raw_points) > 512:
-            raise ValueError("Se admiten hasta 512 puntos por parte.")
+            raise ValueError("Each part supports up to 512 points.")
         for point in raw_points:
             if not isinstance(point, dict) or not all(name in point for name in ("x", "y", "label")):
-                raise ValueError("Cada punto debe contener x, y y label.")
+                raise ValueError("Each point must contain x, y, and label.")
             if any(isinstance(point[name], bool) or not isinstance(point[name], (int, float)) for name in ("x", "y")):
-                raise ValueError("Las coordenadas de los puntos deben ser números.")
+                raise ValueError("Point coordinates must be numbers.")
             x, y, label = float(point["x"]), float(point["y"]), point["label"]
             if not math.isfinite(x) or not math.isfinite(y) or not (0 <= x < width and 0 <= y < height):
-                raise ValueError("Los puntos deben estar dentro de la imagen.")
+                raise ValueError("Points must be inside the image.")
             if type(label) is not int or label not in (0, 1):
-                raise ValueError("La etiqueta de un punto debe ser 0 o 1.")
+                raise ValueError("A point label must be 0 or 1.")
             points.append((x, y, int(label)))
         box = None
         if part.get("box") is not None:
             if not isinstance(part["box"], (list, tuple)) or len(part["box"]) != 4:
-                raise ValueError("La caja debe contener x1, y1, x2, y2.")
+                raise ValueError("The box must contain x1, y1, x2, y2.")
             if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in part["box"]):
-                raise ValueError("Las coordenadas de la caja deben ser números.")
+                raise ValueError("Box coordinates must be numbers.")
             box = tuple(float(value) for value in part["box"])
             if not all(math.isfinite(value) for value in box) or not (
                 0 <= box[0] < box[2] <= width and 0 <= box[1] < box[3] <= height
             ):
-                raise ValueError("La caja debe tener área y estar dentro de la imagen.")
+                raise ValueError("The box must have positive area and be inside the image.")
         if not any(p[2] == 1 for p in points) and box is None and part.get("seed_mask") is None:
-            raise ValueError("Añade un punto positivo, una caja o una máscara inicial.")
+            raise ValueError("Add a positive point, a box, or an initial mask.")
         return tuple(points), box
 
     def _seed_logits(self, key: tuple, seed: np.ndarray):
@@ -312,7 +312,7 @@ class Sam3Engine:
 
             seed = decode_mask(part["seed_mask"])
             if seed.shape != (image.height, image.width) or not seed.any():
-                raise ValueError("La máscara inicial debe coincidir con la imagen y contener un objeto.")
+                raise ValueError("The initial mask must match the image and contain an object.")
         key = self._image_key(image, image_key)
         return self._execute(lambda: self._predict_points(image, key, part, points, box, seed))
 
@@ -347,7 +347,7 @@ class Sam3Engine:
         outputs = self._tracker(image_embeddings=embeddings, multimask_output=multimask, **model_inputs)
         scores = outputs.iou_scores[0, 0].float()
         if not self._torch.isfinite(scores).all() or not self._torch.isfinite(outputs.pred_masks).all():
-            raise ModelUnavailable("SAM 3 devolvió valores numéricos no válidos; prueba con CPU.")
+            raise ModelUnavailable("SAM 3 returned invalid numeric values; try using CPU.")
         best = int(scores.argmax().item())
         low_res = outputs.pred_masks[0, 0, best].float().detach().cpu()
         high_res = self._tracker_processor.post_process_masks(
@@ -366,10 +366,10 @@ class Sam3Engine:
 
     def predict_text(self, image: Image.Image, image_key: str, text: str) -> list[dict]:
         if not isinstance(text, str):
-            raise ValueError("El concepto debe ser texto.")
+            raise ValueError("The concept must be text.")
         text = text.strip()
         if not text or len(text) > 256:
-            raise ValueError("Escribe un concepto de entre 1 y 256 caracteres.")
+            raise ValueError("Enter a concept containing 1 to 256 characters.")
         image = image.convert("RGB")
         key = self._image_key(image, image_key)
         return self._execute(lambda: self._predict_text(image, key, text))
@@ -383,15 +383,15 @@ class Sam3Engine:
         max_tokens = self._detector.config.text_config.max_position_embeddings
         if inputs["input_ids"].shape[-1] > max_tokens:
             raise ValueError(
-                f"La descripción es demasiado larga para SAM 3 (máximo {max_tokens} tokens). "
-                "Usa una descripción más corta."
+                f"The description is too long for SAM 3 (maximum {max_tokens} tokens). "
+                "Use a shorter description."
             )
         embeddings = self._detector_embeddings(image, key)
         outputs = self._detector(vision_embeds=embeddings, **self._device_inputs(inputs))
         if (not self._torch.isfinite(outputs.pred_masks).all()
                 or not self._torch.isfinite(outputs.pred_logits).all()
                 or (outputs.presence_logits is not None and not self._torch.isfinite(outputs.presence_logits).all())):
-            raise ModelUnavailable("SAM 3 devolvió valores numéricos no válidos; prueba con CPU.")
+            raise ModelUnavailable("SAM 3 returned invalid numeric values; try using CPU.")
         results = self._detector_processor.post_process_instance_segmentation(
             outputs, threshold=self.confidence_threshold, mask_threshold=0.5,
             target_sizes=[[image.height, image.width]],
@@ -406,7 +406,7 @@ class Sam3Engine:
         masks = results["masks"].detach().cpu().numpy().astype(bool)
         scores = results["scores"].detach().cpu().numpy()
         if len(kept_logits) != len(masks):
-            raise ModelUnavailable("La versión de Transformers cambió el orden de resultados de SAM 3.")
+            raise ModelUnavailable("This Transformers version changed the order of SAM 3 results.")
         proposals = []
         for mask, score, logits in zip(masks, scores, kept_logits):
             if mask.any():

@@ -51,8 +51,8 @@ export function useWorkspace(onError: (message: string) => void) {
           e.conflict = err instanceof ApiError && err.status === 409;
           errorFn.current(
             e.conflict
-              ? "El proyecto cambió en otra ventana. Conservamos tus cambios; revisa el conflicto."
-              : `No se pudo guardar: ${e.error}`,
+              ? "The project changed in another window. Your changes are preserved; resolve the conflict."
+              : `Could not save: ${e.error}`,
           );
         } finally {
           e.saving = false;
@@ -132,7 +132,7 @@ export function useWorkspace(onError: (message: string) => void) {
     );
     if ([...records.current.values()].some((e) => e.dirty || e.conflict))
       throw new Error(
-        "Hay cambios pendientes de guardar. Resuelve el error antes de continuar.",
+        "There are unsaved changes. Resolve the error before continuing.",
       );
   }, []);
   const reset = useCallback(() => {

@@ -1,1 +1,1 @@
-"""Atelier: local, lossless image annotation."""
+"""Annotation and Training: local, lossless image annotation."""

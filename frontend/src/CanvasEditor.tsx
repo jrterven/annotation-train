@@ -41,6 +41,7 @@ type Props = {
   onProposal: (id: string) => void;
   onPoint: (point: XY, negative: boolean) => void;
   onBox: (box: [number, number, number, number]) => void;
+  onPolygon: (vertices: XY[], closed: boolean) => void;
   onGeometry: (id: string, components: Component[]) => void;
   fitRef: React.RefObject<(() => void) | null>;
 };
@@ -71,10 +72,55 @@ function MaskImage({
 }) {
   const url = useMemo(() => maskURL(mask, color), [mask, color]);
   const image = useImage(url);
-  return <KonvaImage image={image} opacity={opacity} listening={false} />;
+  return (
+    <KonvaImage
+      name="mask-fill"
+      image={image}
+      opacity={Math.min(1, Math.max(0, opacity))}
+      listening={false}
+    />
+  );
 }
 const flat = (points: XY[]) => points.flat();
 const rings = (c: Component) => [c.outer, ...c.holes];
+function MaskOutline({
+  components,
+  color,
+  scale,
+}: {
+  components: Component[];
+  color: string;
+  scale: number;
+}) {
+  return (
+    <Group name="mask-outline" listening={false}>
+      {components.flatMap((component, ci) =>
+        rings(component).map((ring, ri) => (
+          <Group key={`${ci}-${ri}`}>
+            <Line
+              name="mask-outline-halo"
+              points={flat(ring)}
+              closed
+              stroke="#111827"
+              strokeWidth={4 / scale}
+              lineJoin="round"
+              listening={false}
+            />
+            <Line
+              name="mask-outline-color"
+              points={flat(ring)}
+              closed
+              stroke={color}
+              strokeWidth={2 / scale}
+              lineJoin="round"
+              listening={false}
+            />
+          </Group>
+        )),
+      )}
+    </Group>
+  );
+}
 export default function CanvasEditor(p: Props) {
   const container = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -90,6 +136,11 @@ export default function CanvasEditor(p: Props) {
   } | null>(null);
   const [box, setBox] = useState<{ start: XY; end: XY } | null>(null);
   const [edit, setEdit] = useState<Component[] | null>(null);
+  const [hover, setHover] = useState<XY | null>(null);
+  const [polygonEdit, setPolygonEdit] = useState<{
+    id: string;
+    vertices: XY[];
+  } | null>(null);
   const source = useImage(assetURL(`/images/${p.image.id}/file`));
   const fit = Math.min(
     (size.width - 100) / p.image.width,
@@ -98,6 +149,10 @@ export default function CanvasEditor(p: Props) {
   );
   const scale = Math.max(0.001, fit * zoom);
   const chosen = p.annotations.find((a) => a.id === p.selected);
+  const activePart = p.draft?.parts.find(
+    (part) => part.id === p.draft?.active_part_id,
+  );
+  const activePolygon = activePart?.polygon;
   const geometryKey = JSON.stringify(chosen?.controls ?? chosen?.components);
   // Draft inference and autosave can replace the parent state while dragging.
   // Equal geometry must keep its reference so those updates don't reset edits.
@@ -131,6 +186,10 @@ export default function CanvasEditor(p: Props) {
   useEffect(() => {
     setEdit(null);
   }, [p.selected, baseGeometry]);
+  useEffect(() => {
+    setPolygonEdit(null);
+    setHover(null);
+  }, [p.image.id, activePart?.id, JSON.stringify(activePolygon), p.tool]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (
@@ -194,6 +253,24 @@ export default function CanvasEditor(p: Props) {
       at[1] >= p.image.height
     )
       return;
+    if (p.busy) return;
+    if (p.tool === "polygon") {
+      if (e.evt.button !== 0 || activePolygon?.closed) return;
+      const vertices = activePolygon?.vertices || [];
+      if (
+        vertices.length >= 3 &&
+        Math.hypot(at[0] - vertices[0][0], at[1] - vertices[0][1]) * scale <= 9
+      )
+        p.onPolygon(vertices, true);
+      else if (
+        !vertices.length ||
+        Math.hypot(at[0] - vertices.at(-1)![0], at[1] - vertices.at(-1)![1]) *
+          scale >
+          2
+      )
+        p.onPolygon([...vertices, bounded(at)], false);
+      return;
+    }
     if (p.tool === "box") {
       setBox({ start: at, end: at });
       return;
@@ -222,6 +299,10 @@ export default function CanvasEditor(p: Props) {
         x: dragPan.ox + raw.x - dragPan.x,
         y: dragPan.oy + raw.y - dragPan.y,
       });
+    if (p.tool === "polygon" && !activePolygon?.closed) {
+      const at = coord();
+      setHover(at ? bounded(at) : null);
+    }
     if (box) {
       const at = coord();
       if (at) setBox({ ...box, end: bounded(at) });
@@ -298,7 +379,10 @@ export default function CanvasEditor(p: Props) {
         onMouseDown={down}
         onMouseMove={move}
         onMouseUp={up}
-        onMouseLeave={up}
+        onMouseLeave={() => {
+          up();
+          setHover(null);
+        }}
         onContextMenu={(e) => e.evt.preventDefault()}
         onWheel={(e) => {
           e.evt.preventDefault();
@@ -324,101 +408,193 @@ export default function CanvasEditor(p: Props) {
               listening={false}
             />
             {p.showMasks &&
-              p.annotations.map((a) => (
-                <MaskImage
-                  key={a.id}
-                  mask={a.mask}
-                  color={
-                    p.categories.find((c) => c.id === a.category_id)?.color ||
-                    "#8991bd"
-                  }
-                  opacity={
-                    a.id === p.selected
-                      ? Math.min(0.8, p.opacity + 0.12)
-                      : p.opacity
-                  }
-                />
-              ))}
+              p.annotations.map((a) => {
+                const color =
+                  p.categories.find((c) => c.id === a.category_id)?.color ||
+                  "#06b6d4";
+                return (
+                  <Group key={a.id}>
+                    <MaskImage
+                      mask={a.mask}
+                      color={color}
+                      opacity={p.opacity * (a.id === p.selected ? 1.15 : 1)}
+                    />
+                    <MaskOutline
+                      components={a.components}
+                      color={color}
+                      scale={scale}
+                    />
+                  </Group>
+                );
+              })}
             {p.showMasks &&
-              p.proposals.map((a) => (
-                <MaskImage
-                  key={a.id}
-                  mask={a.mask}
-                  color={a.selected ? "#b3d0a3" : "#aab6dc"}
-                  opacity={
-                    a.selected
-                      ? Math.min(0.8, p.opacity + 0.15)
-                      : p.opacity * 0.65
-                  }
-                />
-              ))}
-            {p.proposals
-              .filter((a) => a.selected)
-              .flatMap((a) =>
-                a.components.flatMap((c, ci) =>
-                  rings(c).map((ring, ri) => (
-                    <Line
-                      key={`${a.id}-${ci}-${ri}`}
-                      points={flat(ring)}
-                      closed
-                      stroke="#d9f0cd"
-                      strokeWidth={1.5 / scale}
+              p.proposals.map((a) => {
+                const color = a.selected ? "#22c55e" : "#38bdf8";
+                return (
+                  <Group key={a.id}>
+                    <MaskImage
+                      mask={a.mask}
+                      color={color}
+                      opacity={p.opacity * (a.selected ? 1.12 : 0.85)}
+                    />
+                    <MaskOutline
+                      components={a.components}
+                      color={color}
+                      scale={scale}
+                    />
+                  </Group>
+                );
+              })}
+            {p.draft?.parts.map((part) => {
+              const active = part.id === p.draft?.active_part_id;
+              const vertices =
+                polygonEdit?.id === part.id
+                  ? polygonEdit.vertices
+                  : part.polygon?.vertices || [];
+              const polygonEditable =
+                active && p.tool === "polygon" && !p.busy && !space;
+              return (
+                <Group key={part.id}>
+                  {part.mask && p.showMasks && (
+                    <Group>
+                      <MaskImage
+                        mask={part.mask}
+                        color={
+                          p.categories.find(
+                            (c) => c.id === p.draft?.category_id,
+                          )?.color || "#06b6d4"
+                        }
+                        opacity={p.opacity * 1.12}
+                      />
+                      <MaskOutline
+                        components={part.components || []}
+                        color={
+                          p.categories.find(
+                            (c) => c.id === p.draft?.category_id,
+                          )?.color || "#06b6d4"
+                        }
+                        scale={scale}
+                      />
+                    </Group>
+                  )}
+                  {part.box && (
+                    <Rect
+                      x={part.box[0]}
+                      y={part.box[1]}
+                      width={part.box[2] - part.box[0]}
+                      height={part.box[3] - part.box[1]}
+                      stroke="#faf8ed"
+                      strokeWidth={1.4 / scale}
+                      dash={[5 / scale, 4 / scale]}
                       listening={false}
                     />
-                  )),
-                ),
-              )}
-            {p.draft?.parts.map((part) => (
-              <Group key={part.id}>
-                {part.mask && p.showMasks && (
-                  <MaskImage
-                    mask={part.mask}
-                    color={
-                      p.categories.find((c) => c.id === p.draft?.category_id)
-                        ?.color || "#b49ee2"
-                    }
-                    opacity={p.opacity + 0.05}
-                  />
-                )}
-                {part.box && (
-                  <Rect
-                    x={part.box[0]}
-                    y={part.box[1]}
-                    width={part.box[2] - part.box[0]}
-                    height={part.box[3] - part.box[1]}
-                    stroke="#faf8ed"
-                    strokeWidth={1.4 / scale}
-                    dash={[5 / scale, 4 / scale]}
-                    listening={false}
-                  />
-                )}
-                {part.points.map((point, i) => (
-                  <Group key={i} x={point.x} y={point.y}>
-                    <Circle
-                      radius={5 / scale}
-                      fill={point.label ? "#e8f3df" : "#f4d9d0"}
-                      stroke={point.label ? "#416641" : "#9a4936"}
-                      strokeWidth={1.5 / scale}
-                      listening={false}
-                    />
-                    <Line
-                      points={[-2 / scale, 0, 2 / scale, 0]}
-                      stroke={point.label ? "#416641" : "#9a4936"}
-                      strokeWidth={1 / scale}
-                      listening={false}
-                    />
-                    {Boolean(point.label) && (
+                  )}
+                  {part.polygon && (!part.mask || polygonEditable) && (
+                    <Group>
                       <Line
-                        points={[0, -2 / scale, 0, 2 / scale]}
-                        stroke="#416641"
+                        name="polygon-prompt"
+                        points={flat(vertices)}
+                        closed={part.polygon.closed}
+                        stroke={active ? "#faf5da" : "#a9aca4"}
+                        strokeWidth={1.5 / scale}
+                        fill={
+                          part.polygon.closed && !part.mask
+                            ? "rgba(250,245,218,.1)"
+                            : undefined
+                        }
+                        dash={[5 / scale, 3 / scale]}
+                        listening={false}
+                      />
+                      {active &&
+                        p.tool === "polygon" &&
+                        !part.polygon.closed &&
+                        vertices.length > 0 &&
+                        hover && (
+                          <Line
+                            points={flat([vertices.at(-1)!, hover])}
+                            stroke="#faf5da"
+                            strokeWidth={1 / scale}
+                            dash={[4 / scale, 4 / scale]}
+                            listening={false}
+                          />
+                        )}
+                      {active &&
+                        vertices.map((point, index) => (
+                          <Circle
+                            key={index}
+                            name="polygon-vertex"
+                            x={point[0]}
+                            y={point[1]}
+                            radius={
+                              (index === 0 && !part.polygon!.closed ? 5 : 3.5) /
+                              scale
+                            }
+                            fill={index === 0 ? "#eed5a0" : "#fffef4"}
+                            stroke="#544d39"
+                            strokeWidth={1 / scale}
+                            hitStrokeWidth={8 / scale}
+                            listening={polygonEditable}
+                            draggable={
+                              polygonEditable &&
+                              (index !== 0 || !!part.polygon!.closed)
+                            }
+                            onMouseDown={(e) => {
+                              e.cancelBubble = true;
+                              if (
+                                index === 0 &&
+                                !part.polygon!.closed &&
+                                vertices.length >= 3 &&
+                                e.evt.button === 0
+                              )
+                                p.onPolygon(vertices, true);
+                            }}
+                            onDragMove={(e) => {
+                              const next = structuredClone(vertices);
+                              const at = bounded([e.target.x(), e.target.y()]);
+                              e.target.position({ x: at[0], y: at[1] });
+                              next[index] = at;
+                              setPolygonEdit({ id: part.id, vertices: next });
+                            }}
+                            onDragEnd={(e) => {
+                              const next = structuredClone(vertices);
+                              const at = bounded([e.target.x(), e.target.y()]);
+                              e.target.position({ x: at[0], y: at[1] });
+                              next[index] = at;
+                              setPolygonEdit(null);
+                              p.onPolygon(next, part.polygon!.closed);
+                            }}
+                          />
+                        ))}
+                    </Group>
+                  )}
+                  {part.points.map((point, i) => (
+                    <Group key={i} x={point.x} y={point.y}>
+                      <Circle
+                        radius={5 / scale}
+                        fill={point.label ? "#e8f3df" : "#f4d9d0"}
+                        stroke={point.label ? "#416641" : "#9a4936"}
+                        strokeWidth={1.5 / scale}
+                        listening={false}
+                      />
+                      <Line
+                        points={[-2 / scale, 0, 2 / scale, 0]}
+                        stroke={point.label ? "#416641" : "#9a4936"}
                         strokeWidth={1 / scale}
                         listening={false}
                       />
-                    )}
-                  </Group>
-                ))}
-              </Group>
-            ))}
+                      {Boolean(point.label) && (
+                        <Line
+                          points={[0, -2 / scale, 0, 2 / scale]}
+                          stroke="#416641"
+                          strokeWidth={1 / scale}
+                          listening={false}
+                        />
+                      )}
+                    </Group>
+                  ))}
+                </Group>
+              );
+            })}
             {chosen &&
               geometry?.flatMap((component, ci) =>
                 rings(component).map((ring, ri) => (
@@ -507,47 +683,47 @@ export default function CanvasEditor(p: Props) {
           </span>
         </span>
         <span className="canvas-tech">
-          <ScanLine size={13} /> Píxeles originales
+          <ScanLine size={13} /> Original pixels
         </span>
       </div>
       <div className="zoom-controls">
         <button
           onClick={() => zoomTo(zoom / 0.8)}
-          title="Acercar"
-          aria-label="Acercar"
+          title="Zoom in"
+          aria-label="Zoom in"
         >
           <Plus size={16} />
         </button>
         <span>{Math.round(scale * 100)}%</span>
         <button
           onClick={() => zoomTo(zoom * 0.8)}
-          title="Alejar"
-          aria-label="Alejar"
+          title="Zoom out"
+          aria-label="Zoom out"
         >
           <Minus size={16} />
         </button>
         <i />
-        <button
-          onClick={fitView}
-          title="Ajustar imagen · F"
-          aria-label="Ajustar imagen"
-        >
+        <button onClick={fitView} title="Fit image · F" aria-label="Fit image">
           <Focus size={17} />
         </button>
       </div>
       <div className="canvas-instruction">
         {space
-          ? "Arrastra para desplazar"
-          : p.tool === "box"
-            ? "Arrastra para delimitar el objeto"
-            : p.tool === "negative"
-              ? "Clic para excluir una región"
-              : p.tool === "positive"
-                ? "Clic positivo · clic derecho negativo"
-                : chosen
-                  ? "Arrastra vértices · doble clic en borde para insertar"
-                  : "Selecciona una instancia"}
-        <span>Espacio + arrastrar para mover</span>
+          ? "Drag to pan"
+          : p.tool === "polygon"
+            ? activePolygon?.closed
+              ? "Refine with SAM · drag vertices to adjust"
+              : "Click to add vertices · click the first or press Enter to close"
+            : p.tool === "box"
+              ? "Drag a box around the object"
+              : p.tool === "negative"
+                ? "Click to exclude a region"
+                : p.tool === "positive"
+                  ? "Positive click · right-click to exclude"
+                  : chosen
+                    ? "Drag vertices · double-click an edge to insert"
+                    : "Select an instance"}
+        <span>Space + drag to pan</span>
       </div>
     </div>
   );

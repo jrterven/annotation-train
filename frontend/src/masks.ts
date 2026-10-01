@@ -9,18 +9,18 @@ export function decodeCounts(encoded: string): number[] {
       more = true,
       c = 0;
     while (more) {
-      if (p >= encoded.length) throw new Error("Máscara RLE incompleta");
+      if (p >= encoded.length) throw new Error("Incomplete RLE mask");
       c = encoded.charCodeAt(p++) - 48;
-      if (c < 0 || c > 63) throw new Error("Máscara RLE inválida");
+      if (c < 0 || c > 63) throw new Error("Invalid RLE mask");
       value += (c & 31) * 2 ** shift;
       shift += 5;
       more = Boolean(c & 32);
-      if (shift > 55) throw new Error("Máscara RLE demasiado grande");
+      if (shift > 55) throw new Error("RLE mask is too large");
     }
     if (c & 16) value -= 2 ** shift;
     if (counts.length > 2) value += counts[counts.length - 2];
     if (value < 0 || !Number.isSafeInteger(value))
-      throw new Error("Máscara RLE inválida");
+      throw new Error("Invalid RLE mask");
     counts.push(value);
   }
   return counts;
@@ -57,7 +57,7 @@ export function maskURL(mask: Mask, color: string): string {
   let offset = 0;
   let filled = false;
   for (const count of decodeCounts(mask.counts)) {
-    if (offset + count > w * h) throw new Error("Dimensiones RLE inválidas");
+    if (offset + count > w * h) throw new Error("Invalid RLE dimensions");
     if (filled) {
       for (let i = offset; i < offset + count; i++) {
         const x = Math.floor(i / h),
@@ -72,7 +72,7 @@ export function maskURL(mask: Mask, color: string): string {
     offset += count;
     filled = !filled;
   }
-  if (offset !== w * h) throw new Error("Dimensiones RLE incompletas");
+  if (offset !== w * h) throw new Error("Incomplete RLE dimensions");
   ctx.putImageData(data, 0, 0);
   const url = canvas.toDataURL();
   cache.set(key, url);

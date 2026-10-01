@@ -13,6 +13,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast, Sam3Config, Sam3ImageProcessor, Sam3Processor, Sam3TrackerProcessor
 
+from app.geometry import encode_mask
 from app.inference import ModelUnavailable, Sam3Engine, _is_mps_unsupported, _mask_digest, _safe_error
 
 
@@ -76,9 +77,9 @@ def test_caches_are_bounded_and_image_content_is_part_of_identity():
 
 def test_invalid_prompts_do_not_load_weights():
     engine = Sam3Engine()
-    with pytest.raises(ValueError, match="positivo"):
+    with pytest.raises(ValueError, match="positive"):
         engine.predict_points(Image.new("RGB", (100, 100)), "image", {"points": [{"x": 1, "y": 1, "label": 0}]})
-    with pytest.raises(ValueError, match="dentro"):
+    with pytest.raises(ValueError, match="inside"):
         engine.predict_points(Image.new("RGB", (100, 100)), "image", {"points": [{"x": 100, "y": 1, "label": 1}]})
     with pytest.raises(ValueError):
         engine.predict_text(Image.new("RGB", (100, 100)), "image", " ")
@@ -134,6 +135,50 @@ def test_removing_click_discards_previous_logits_and_restores_original_seed(proc
         assert recorded[0] is None and recorded[2] is None
 
 
+def test_polygon_seed_needs_no_box_or_positive_click_and_accepts_negative_correction(processor, monkeypatch):
+    class RecordingTracker:
+        prompt_encoder = SimpleNamespace(mask_input_size=(288, 288))
+
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(iou_scores=torch.ones((1, 1, 1)),
+                                   pred_masks=torch.ones((1, 1, 1, 288, 288)))
+
+    engine = Sam3Engine(device="cpu")
+    engine._torch = torch
+    engine._device = "cpu"
+    engine._tracker_processor = processor
+    engine._tracker = RecordingTracker()
+    monkeypatch.setattr(engine, "_tracker_embeddings", lambda image, key: [])
+    monkeypatch.setattr(engine, "_execute", lambda prediction: prediction())
+    image = Image.new("RGB", (60, 20))
+    seed = np.zeros((20, 60), dtype=bool)
+    seed[:, 30:] = True
+    part = {"id": "polygon", "points": [], "seed_mask": encode_mask(seed),
+            "polygon": {"vertices": [[30, 0], [60, 0], [60, 20], [30, 20]], "closed": True}}
+    mask = engine.predict_points(image, "image", part)
+    first = engine._tracker.calls[0]
+    assert mask.shape == seed.shape
+    assert "input_points" not in first and "input_boxes" not in first
+    assert first["multimask_output"] is False
+    assert (first["input_masks"][..., :140] < 0).all()
+    assert (first["input_masks"][..., 148:] > 0).all()
+
+    part["points"] = [{"x": 45, "y": 10, "label": 0}]
+    engine.predict_points(image, "image", part)
+    corrected = engine._tracker.calls[1]
+    assert corrected["input_labels"].tolist() == [[[0]]]
+    torch.testing.assert_close(corrected["input_points"][0, 0, 0], torch.tensor([756.0, 504.0]))
+    assert torch.all(corrected["input_masks"] == 1.0)  # Continue from prior SAM logits.
+
+    part["points"] = []
+    engine.predict_points(image, "image", part)
+    torch.testing.assert_close(engine._tracker.calls[2]["input_masks"], first["input_masks"])
+
+
 @pytest.mark.parametrize("part", [
     {"points": [None]}, {"points": [{"x": 1, "y": 2}]},
     {"points": [{"x": "x", "y": 2, "label": 1}]},
@@ -180,7 +225,7 @@ def test_long_text_rejected_before_embeddings_without_silent_truncation(text_con
     assert len(text) < 256
     encoded = engine._detector_processor(text=text, return_tensors="pt")
     assert encoded["input_ids"].shape[-1] == 33
-    with pytest.raises(ValueError, match="máximo 32 tokens"):
+    with pytest.raises(ValueError, match="maximum 32 tokens"):
         engine._predict_text(Image.new("RGB", (60, 20)), ("test",), text)
     assert embedding_calls == []
     assert engine._detector.calls == []
@@ -202,7 +247,7 @@ def test_text_at_configured_token_limit_is_preserved(text_contract_engine, max_t
 def test_nonfinite_presence_is_model_error_not_empty_detection(text_contract_engine, invalid_presence):
     engine, _ = text_contract_engine
     engine._detector.presence = torch.tensor([[invalid_presence]])
-    with pytest.raises(ModelUnavailable, match="valores numéricos no válidos"):
+    with pytest.raises(ModelUnavailable, match="invalid numeric values"):
         engine._predict_text(Image.new("RGB", (60, 20)), ("test",), "shoe")
     assert not engine._seed_cache
 
