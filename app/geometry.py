@@ -1,0 +1,241 @@
+"""Lossless COCO masks and editable polygons in original-image coordinates."""
+
+from __future__ import annotations
+
+import base64
+import io
+import math
+import re
+from typing import Any
+
+import numpy as np
+from PIL import Image
+from pycocotools import mask as coco_mask
+from shapely import box, intersects_xy, union_all
+from shapely.geometry import MultiPolygon, Polygon
+from shapely.validation import explain_validity
+
+
+def encode_mask(mask: np.ndarray) -> dict:
+    array = np.asarray(mask)
+    if array.ndim != 2 or min(array.shape) < 1:
+        raise ValueError("La máscara debe ser una matriz bidimensional no vacía.")
+    rle = coco_mask.encode(np.asfortranarray(array.astype(np.uint8) != 0, dtype=np.uint8))
+    return {"size": [int(n) for n in rle["size"]], "counts": rle["counts"].decode("ascii")}
+
+
+def decode_mask(rle: dict) -> np.ndarray:
+    if not isinstance(rle, dict):
+        raise ValueError("La máscara debe usar RLE COCO.")
+    size, counts = rle.get("size"), rle.get("counts")
+    if (not isinstance(size, (list, tuple)) or len(size) != 2
+            or any(type(n) is not int or n <= 0 for n in size)):
+        raise ValueError("RLE size debe contener alto y ancho positivos.")
+    height, width = size
+    if height * width > 150_000_000:
+        raise ValueError("La máscara excede el límite de 150 megapíxeles.")
+    # Validate runs ourselves before entering the C decoder. Invalid compressed
+    # counts can otherwise read/write outside the expected allocation.
+    if isinstance(counts, str):
+        runs, value, shift, previous = [], 0, 0, []
+        at = 0
+        while at < len(counts):
+            value, shift = 0, 0
+            while True:
+                if at >= len(counts):
+                    raise ValueError("RLE comprimido incompleto.")
+                code = ord(counts[at]) - 48
+                at += 1
+                if code < 0 or code > 63 or shift > 60:
+                    raise ValueError("RLE comprimido inválido.")
+                value |= (code & 0x1F) << shift
+                shift += 5
+                if not code & 0x20:
+                    if code & 0x10:
+                        value |= -1 << shift
+                    break
+            if len(previous) > 2:
+                value += previous[-2]
+            if value < 0:
+                raise ValueError("RLE contiene longitudes negativas.")
+            previous.append(value)
+            runs.append(value)
+    elif isinstance(counts, list) and all(type(n) is int and n >= 0 for n in counts):
+        runs = counts
+    else:
+        raise ValueError("RLE counts debe ser texto o una lista de enteros.")
+    if not runs or sum(runs) != height * width:
+        raise ValueError("Las longitudes RLE no coinciden con las dimensiones.")
+    try:
+        encoded = {"size": [height, width], "counts": counts}
+        if isinstance(counts, list):
+            encoded = coco_mask.frPyObjects(encoded, height, width)
+        return np.asarray(coco_mask.decode(encoded), dtype=bool)
+    except Exception as error:
+        raise ValueError("No se pudo decodificar la máscara RLE.") from error
+
+
+def _ring(points: Any, width: int, height: int) -> list[tuple[float, float]]:
+    if not isinstance(points, (list, tuple)) or len(points) < 3:
+        raise ValueError("Cada contorno necesita al menos tres vértices.")
+    output = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError("Cada vértice debe contener x e y.")
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in point):
+            raise ValueError("Las coordenadas deben ser números finitos.")
+        x, y = map(float, point)
+        if not 0 <= x <= width or not 0 <= y <= height:
+            raise ValueError("Un vértice está fuera de la imagen.")
+        output.append((x, y))
+    if len(set(output)) < 3:
+        raise ValueError("Cada contorno necesita tres vértices distintos.")
+    return output
+
+
+def _validated_polygons(components: list[dict], width: int, height: int) -> list[Polygon]:
+    if type(width) is not int or type(height) is not int or min(width, height) < 1:
+        raise ValueError("Las dimensiones deben ser enteros positivos.")
+    if width * height > 150_000_000 or not isinstance(components, list):
+        raise ValueError("Geometría o dimensiones no válidas.")
+    polygons = []
+    for component in components:
+        if not isinstance(component, dict) or not isinstance(component.get("holes", []), list):
+            raise ValueError("Componente geométrico inválido.")
+        polygon = Polygon(_ring(component.get("outer"), width, height),
+                          [_ring(hole, width, height) for hole in component.get("holes", [])])
+        if polygon.is_empty or polygon.area <= 0 or not polygon.is_valid:
+            raise ValueError(f"Polígono inválido: {explain_validity(polygon)}")
+        polygons.append(polygon)
+    return polygons
+
+
+def validate_components(components: list[dict], width: int, height: int) -> None:
+    """Validate editable topology without requiring equality to a pixel mask."""
+    _validated_polygons(components, width, height)
+
+
+def rasterize_components(components: list[dict], width: int, height: int) -> np.ndarray:
+    polygons = _validated_polygons(components, width, height)
+    mask = np.zeros((height, width), dtype=bool)
+    for polygon in polygons:
+        x0, y0, x1, y1 = polygon.bounds
+        left, top = max(0, math.floor(x0)), max(0, math.floor(y0))
+        right, bottom = min(width, math.ceil(x1)), min(height, math.ceil(y1))
+        # Chunk rows to avoid allocating two full-image float64 coordinate grids.
+        xs = np.arange(left, right, dtype=float) + 0.5
+        for start in range(top, bottom, 256):
+            stop = min(start + 256, bottom)
+            ys = (np.arange(start, stop, dtype=float) + 0.5)[:, None]
+            mask[start:stop, left:right] |= intersects_xy(polygon, xs[None, :], ys)
+    return mask
+
+
+def _coordinates(ring: Any) -> list[list[float]]:
+    """Remove the closing duplicate; add handles along long straight edges."""
+    points = list(ring.coords)[:-1]
+    output = []
+    for index, (x, y) in enumerate(points):
+        nx, ny = points[(index + 1) % len(points)]
+        steps = max(1, math.ceil(math.hypot(nx - x, ny - y) / 24))
+        output.extend([[float(x + (nx - x) * step / steps), float(y + (ny - y) * step / steps)]
+                       for step in range(steps)])
+    return output
+
+
+def _mask_shape(mask: np.ndarray):
+    # Union horizontal pixel runs, not centerline contours. Cell boundaries
+    # preserve one-pixel objects, holes, disconnected islands, and edge pixels.
+    padded = np.pad(mask.astype(np.int8), ((0, 0), (1, 1)))
+    transitions = np.diff(padded, axis=1)
+    starts_y, starts_x = np.nonzero(transitions == 1)
+    ends_y, ends_x = np.nonzero(transitions == -1)
+    if not len(starts_x):
+        return Polygon()
+    rectangles = box(starts_x, starts_y, ends_x, ends_y + 1)
+    return union_all(rectangles).simplify(0, preserve_topology=True)
+
+
+def _shape_polygons(shape) -> list[Polygon]:
+    if shape.is_empty:
+        return []
+    polygons = [shape] if shape.geom_type == "Polygon" else list(shape.geoms)
+    polygons.sort(key=lambda item: (item.bounds[1], item.bounds[0], -item.area))
+    return polygons
+
+
+def _shape_components(shape) -> list[dict]:
+    return [{"outer": _coordinates(poly.exterior), "holes": [_coordinates(ring) for ring in poly.interiors]}
+            for poly in _shape_polygons(shape)]
+
+
+def _control_components(shape) -> list[dict]:
+    """Simplified editing handles, kept separate from the lossless boundary."""
+    if shape.is_empty:
+        return []
+    # Global simplification preserves the relationship between adjacent parts.
+    simplified = shape.simplify(1.0, preserve_topology=True)
+    originals = [shape] if shape.geom_type == "Polygon" else list(shape.geoms)
+    candidates = [simplified] if simplified.geom_type == "Polygon" else list(simplified.geoms)
+    if len(originals) != len(candidates):
+        return _shape_components(shape)
+    safe = []
+    for original, candidate in zip(originals, candidates):
+        # GEOS can legally reduce a one-pixel square/hole to a triangle. Keep
+        # tiny rings exact so editing another part cannot erase their pixel.
+        if original.area <= 4 or len(original.interiors) != len(candidate.interiors):
+            safe.append(original)
+            continue
+        holes = [list(source.coords) if Polygon(source).area <= 4 else list(reduced.coords)
+                 for source, reduced in zip(original.interiors, candidate.interiors)]
+        protected = Polygon(candidate.exterior, holes)
+        safe.append(protected if protected.is_valid else original)
+    result = safe[0] if len(safe) == 1 else MultiPolygon(safe)
+    # Restoring a tiny ring must not introduce intersections with a neighboring
+    # component. Falling back retains every component and hole exactly.
+    return _shape_components(result if result.is_valid else shape)
+
+
+def controls_for_components(components: list[dict], width: int, height: int) -> list[dict]:
+    """Upgrade an older saved record without decoding/retracing its mask."""
+    polygons = _validated_polygons(components, width, height)
+    if not polygons:
+        return []
+    shape = polygons[0] if len(polygons) == 1 else MultiPolygon(polygons)
+    if not shape.is_valid:
+        # Manually edited components may overlap; their pixel semantics is union.
+        shape = union_all(polygons)
+    return _control_components(shape)
+
+
+def mask_preview(mask: np.ndarray, color: str = "#8B8DE3") -> str:
+    """Render only the derived overlay, without retracing stored contours."""
+    array = np.asarray(mask, dtype=bool)
+    if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise ValueError("El color debe tener formato #RRGGBB.")
+    rgba = np.zeros((*array.shape, 4), dtype=np.uint8)
+    rgba[array, :3] = [int(color[offset:offset + 2], 16) for offset in (1, 3, 5)]
+    rgba[array, 3] = 115
+    buffer = io.BytesIO()
+    Image.fromarray(rgba).save(buffer, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def mask_payload(mask: np.ndarray, color: str = "#8B8DE3") -> dict:
+    array = np.asarray(mask, dtype=bool)
+    encoded = encode_mask(array)
+    shape = _mask_shape(array)
+    return {"mask": encoded, "components": _shape_components(shape),
+            "controls": _control_components(shape), "preview": mask_preview(array, color)}
+
+
+def union_masks(masks: list[dict], width: int, height: int) -> np.ndarray:
+    if not isinstance(masks, list) or not masks:
+        raise ValueError("Se necesita al menos una máscara.")
+    output = np.zeros((height, width), dtype=bool)
+    for rle in masks:
+        mask = decode_mask(rle)
+        if mask.shape != (height, width):
+            raise ValueError("Las máscaras no coinciden con las dimensiones de la imagen.")
+        output |= mask
+    return output

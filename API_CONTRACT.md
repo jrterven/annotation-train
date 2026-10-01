@@ -1,0 +1,43 @@
+# Contrato de implementación
+
+API local `/api`, un proyecto abierto por proceso. Errores HTTP `{detail: string}`. Todo JSON usa snake_case. No autenticación remota; localhost y origen validado. Coordenadas píxel originales, lectura de raster sin aplicar EXIF para mantener COCO.
+
+## Tipos
+- Category `{id:number,name:string,color:string,supercategory?:string}`
+- Image `{id:number,file_name:string,width:number,height:number,annotation_count:number}`
+- Project `{name:string,directory:string,image_root:string,categories:Category[],images:Image[]}`
+- Mask: RLE COCO comprimido `{size:[height,width],counts:string}`.
+- Component `{outer:[number,number][],holes:[number,number][][]}`
+- Annotation `{id:string,category_id:number,mask:Mask,components:Component[],controls?:Component[],preview?:string,iscrowd:number}`. IDs string UUID internos; almacenamiento asigna IDs enteros estables para COCO. Preview es data URL PNG coloreada. `components` describe la máscara exacta; `controls` simplifica puntos editables sin modificar la máscara hasta una edición manual.
+- Point `{x:number,y:number,label:0|1}`
+- Part `{id:string,points:Point[],box?:[x1,y1,x2,y2],mask?:Mask,seed_mask?:Mask,preview?:string,components?:Component[],controls?:Component[]}`
+- Draft `{id:string,category_id:number,parts:Part[],active_part_id:string}`
+- Proposal igual Annotation + `{score:number,selected:boolean}`.
+- ImageState `{image_id:number,revision:number,annotations:Annotation[],draft:Draft|null,proposals:Proposal[]}`
+
+## Rutas
+- GET `/health` -> `{status,model:{state,device,message}}`
+- GET `/browse?path=...` -> `{path,parent,directories:[{name,path}],files:[{name,path}],exists:true}` (carpetas e imágenes y JSON).
+- POST `/projects/open` `{directory,image_root?:string,files?:string[],recursive?:boolean}` -> Project. Crea o reabre, raíz por defecto `<directory>/imágenes`. `files` relativos raíz; omitido incorpora todas imágenes. No guardar metadata dentro raíz de imágenes (directory igual o descendiente de image_root inválido).
+- GET `/project` -> Project | null
+- POST `/project/relink` `{image_root}` -> Project
+- POST `/project/categories` `{name,color}` -> Category
+- PATCH `/project/categories/{id}` `{name?,color?}` -> Category
+- GET `/images/{id}/file?thumbnail=true|false` -> imagen PNG (raster original, sin giro EXIF)
+- GET `/images/{id}/state` -> ImageState
+- PUT `/images/{id}/state` ImageState -> ImageState (revision debe coincidir, incremento servidor; conflicto 409). Autosave serializado frontend. Servidor valida máscaras/geometría/referencias. Guardar preview no necesario.
+- POST `/geometry` `{image_id,components}` -> `{mask,components,controls,preview}`
+- POST `/masks/union` `{image_id,masks:Mask[]}` -> `{mask,components,controls,preview}`
+- POST `/infer/points` `{image_id,revision,part:Part}` -> `{image_id,revision,mask,components,controls,preview}`
+- POST `/infer/text` `{image_id,revision,text,category_id}` -> `{image_id,revision,proposals:Proposal[]}`
+- POST `/model/load` -> model status (lazy loading, await complete)
+- POST `/coco/import` `{directory,image_root,json_path}` -> Project (nuevo proyecto; no fusionar)
+- POST `/coco/export` `{}` -> `{path,file_name}` (archivo anotaciones.coco.json en raíz proyecto, escritura atómica)
+- GET `/coco/download` -> JSON exportado
+
+## Módulos de backend asignados
+Las solicitudes de proyecto incluyen `X-Project-Directory` (ruta codificada con encodeURIComponent); imágenes y descargas usan `?project=...`. El servidor valida y captura el proyecto al entrar cada petición. Si otra pestaña abrió otro proyecto, devuelve 409 en lugar de mezclar cambios.
+
+`app/storage.py`: clase ProjectStore(directory), classmethods open(directory,image_root=None,files=None,recursive=True), import_coco(directory,image_root,json_path); methods project(), get_state(image_id), save_state(image_id,state), image_path(image_id), relink(image_root), add_category(name,color), update_category(id,updates), export_coco() -> Path. Excepciones ValueError para entradas y conflicto RevisionConflict.
+`app/geometry.py`: encode_mask(np bool)->RLE, decode_mask(RLE)->np bool, mask_payload(mask,color='#8B8DE3')->{mask,components,preview}, rasterize_components(components,width,height)->np bool, union_masks(masks,width,height)->np bool.
+`app/inference.py`: clase Sam3Engine: status()->dict, load()->dict, predict_points(image PIL, image_key:str, part:dict)->np bool, predict_text(image PIL,image_key:str,text:str)->list[{mask:np bool,score:float}], lock thread RLock. Métodos bloqueantes llamados threadpool API. SAM3 real únicamente. Recuperar seed_mask para texto→tracker. Cachés separadas y limitadas.
