@@ -14,6 +14,7 @@ import {
   Eye,
   EyeOff,
   FolderOpen,
+  Hand,
   HelpCircle,
   ImagePlus,
   Layers3,
@@ -1277,6 +1278,12 @@ export default function App() {
                       title="Select and edit · V"
                       active={tool === "select"}
                       onClick={() => setTool("select")}
+                    />
+                    <IconButton
+                      icon={Hand}
+                      title="Pan image · drag to move"
+                      active={tool === "pan"}
+                      onClick={() => setTool("pan")}
                     />
                     <IconButton
                       icon={Plus}

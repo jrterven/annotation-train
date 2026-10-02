@@ -593,7 +593,7 @@ kbd {
 .canvas-wrap.panning {
   cursor: grab;
 }
-.canvas-wrap.panning:active {
+.canvas-wrap.dragging {
   cursor: grabbing;
 }
 .canvas-topline {

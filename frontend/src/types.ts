@@ -63,4 +63,4 @@ export type GeometryResult = {
   preview: string;
 };
 export type ModelStatus = { state: string; device?: string; message?: string };
-export type Tool = "select" | "positive" | "negative" | "box" | "polygon";
+export type Tool = "select" | "pan" | "positive" | "negative" | "box" | "polygon";

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import Konva from "konva";
 import CanvasEditor from "../CanvasEditor";
@@ -47,6 +47,121 @@ vi.hoisted(() => {
 });
 
 afterEach(cleanup);
+
+it.each(["pan", "space"] as const)(
+  "pans with %s after zooming without changing annotations, then restores editing coordinates",
+  (mode) => {
+    const annotation = {
+      id: "ann",
+      category_id: 1,
+      mask: { size: [3, 4] as [number, number], counts: "11123O" },
+      components: [
+        {
+          outer: [
+            [0, 0],
+            [3, 0],
+            [3, 2],
+            [0, 2],
+          ] as [number, number][],
+          holes: [],
+        },
+      ],
+      iscrowd: 0,
+    };
+    const props = {
+      image: {
+        id: 1,
+        file_name: "test.png",
+        width: 4,
+        height: 3,
+        annotation_count: 1,
+      },
+      annotations: [annotation],
+      proposals: [
+        { ...annotation, id: "proposal", selected: false, score: 0.9 },
+      ],
+      draft: null,
+      categories: [{ id: 1, name: "Object", color: "#06b6d4" }],
+      selected: "ann",
+      showMasks: true,
+      opacity: 0.65,
+      vertex: null,
+      busy: false,
+      onVertex: vi.fn(),
+      onSelect: vi.fn(),
+      onProposal: vi.fn(),
+      onPoint: vi.fn(),
+      onBox: vi.fn(),
+      onPolygon: vi.fn(),
+      onGeometry: vi.fn(),
+      fitRef: { current: null },
+    };
+    const original = JSON.stringify(annotation);
+    const { container, rerender } = render(
+      <CanvasEditor {...props} tool={mode === "pan" ? "pan" : "select"} />,
+    );
+    if (mode === "space") fireEvent.keyDown(window, { code: "Space" });
+    const wrap = container.querySelector(".canvas-wrap")!;
+    const stage = Konva.stages.at(-1)!;
+    const group = stage.findOne("Group")!;
+    expect(wrap.classList.contains("panning")).toBe(true);
+    // Edges and handles must not intercept a drag over a selected object.
+    expect(stage.find("Line").every((node) => !node.isListening())).toBe(true);
+    expect(stage.find("Circle").every((node) => !node.isListening())).toBe(
+      true,
+    );
+    act(() => {
+      stage.setPointersPositions({ clientX: 400, clientY: 300 });
+      stage.fire("wheel", { evt: { deltaY: -1, preventDefault: vi.fn() } });
+    });
+    const before = group.position();
+    const start = group.getAbsoluteTransform().point({ x: 1, y: 1 });
+    act(() => {
+      stage.setPointersPositions({ clientX: start.x, clientY: start.y });
+      stage.fire("mousedown", { evt: { button: 0, preventDefault: vi.fn() } });
+    });
+    expect(wrap.classList.contains("dragging")).toBe(true);
+    act(() => {
+      stage.setPointersPositions({
+        clientX: start.x + 80,
+        clientY: start.y - 40,
+      });
+      stage.fire("mousemove", { evt: {} });
+    });
+    expect(group.position()).toEqual({ x: before.x + 80, y: before.y - 40 });
+    act(() => stage.fire("mouseup", { evt: {} }));
+    expect(wrap.classList.contains("dragging")).toBe(false);
+    for (const callback of [
+      props.onSelect,
+      props.onVertex,
+      props.onProposal,
+      props.onPoint,
+      props.onBox,
+      props.onPolygon,
+      props.onGeometry,
+    ])
+      expect(callback).not.toHaveBeenCalled();
+    expect(JSON.stringify(annotation)).toBe(original);
+
+    if (mode === "space") fireEvent.keyUp(window, { code: "Space" });
+    rerender(<CanvasEditor {...props} tool="select" />);
+    expect(wrap.classList.contains("panning")).toBe(false);
+    expect(
+      stage.find("Circle").filter((node) => node.isListening()),
+    ).toHaveLength(4);
+    rerender(<CanvasEditor {...props} tool="positive" selected={null} />);
+    const at = group.getAbsoluteTransform().point({ x: 1, y: 1 });
+    act(() => {
+      stage.setPointersPositions({ clientX: at.x, clientY: at.y });
+      stage.fire("mousedown", { evt: { button: 0, preventDefault: vi.fn() } });
+    });
+    expect(props.onPoint).toHaveBeenCalledOnce();
+    const [point, negative] = props.onPoint.mock.calls[0];
+    expect(point[0]).toBeCloseTo(1);
+    expect(point[1]).toBeCloseTo(1);
+    expect(negative).toBe(false);
+  },
+);
 
 it("renders, updates, and removes draft point/box/mask nodes in the real Konva scene", () => {
   const props = {

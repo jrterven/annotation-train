@@ -197,6 +197,8 @@ Moving a project together with an internal image folder preserves relative paths
 
 Hover over toolbar tools to see their English labels and keyboard shortcuts. Choose a class, then use **Positive point**, **Negative point**, or **Bounding box**. **Add part to object** adds another region to the same instance; prompts affect the active part. Press **Enter** to confirm the union of its masks.
 
+To move around a zoomed image, select **Pan image** (the hand icon next to **Select and edit**) and drag. Switch back to an annotation tool to continue editing. You can also hold **Space** and drag to pan temporarily.
+
 For an irregular region:
 
 1. Select **Polygon** (`G`) and click to add vertices.

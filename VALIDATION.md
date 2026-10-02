@@ -5,7 +5,7 @@ Hardware: MacBook Pro M4 Max, 128 GB, macOS 27.0.1. Isolated Python 3.12.14 envi
 ## Completed checks
 
 - `python -m pytest -q`: **194 passing tests** covering persistence, geometry, COCO, API, SAM 3 contracts, polygon drafts, mask-seeded refinement, translation, hole cleanup, and visual-reference uploads and inference contracts.
-- `npm run test`: **42 passing tests** covering masks, autosave, conflicts, stale responses, polygon workflows, English interface controls, hole cleanup, real React Konva rendering, and visual-reference selection and searches.
+- `npm run test`: **44 passing tests** covering masks, autosave, conflicts, stale responses, polygon workflows, English interface controls, hole cleanup, real React Konva rendering, hand-tool/Space panning, and visual-reference selection and searches.
 - `npm run build`: TypeScript compilation and the Vite production build pass.
 - `node --experimental-strip-types --test tests/frontend-masks.mjs`: **6 passing tests**. Fixtures encoded by pycocotools are compared pixel by pixel with the browser decoder.
 - `pip check`: no incompatible dependencies reported in the current installed environment.
@@ -17,6 +17,8 @@ Hardware: MacBook Pro M4 Max, 128 GB, macOS 27.0.1. Isolated Python 3.12.14 envi
 Tests cover rectangular masks, holes, islands, single-pixel objects, image borders, manual geometry and vertex edits, optimistic revisions, concurrent saves, COCO IDs, moving projects, external image roots, relinking, and isolation between browser tabs.
 
 Chrome checks include COCO import, image navigation, vertex dragging/insertion/deletion, canvas panning over controls, undo/redo, reload, and export. Undo restored the exact original mask; redo and reload preserved the edit. Both exported COCO files reconstructed pixel-identical masks using `pycocotools.COCO.annToMask`, including the hole. These checks used synthetic test images, not simulated SAM predictions.
+
+The **Pan image** hand tool was checked in Chrome at 1024 and 1440 pixels wide, beside **Select and edit**. With a selected annotation and 195% zoom, the image followed a 90 × −50 pixel drag; the cursor changed from grab to grabbing and back. Tooltips and the Space shortcut worked, and the saved image state remained byte-identical. Automated Konva tests verify that panning does not trigger annotation callbacks and that returning to an annotation tool preserves original-pixel coordinates. Screenshots: `output/playwright/pan-tool.png` and `pan-tool-1024.png`.
 
 A draft with positive/negative points and a second boxed part also survived navigation and project recovery while inference failed because model access was unavailable. That case validates draft persistence, not segmentation quality or model output.
 

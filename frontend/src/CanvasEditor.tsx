@@ -134,6 +134,7 @@ export default function CanvasEditor(p: Props) {
     ox: number;
     oy: number;
   } | null>(null);
+  const panning = space || p.tool === "pan";
   const [box, setBox] = useState<{ start: XY; end: XY } | null>(null);
   const [edit, setEdit] = useState<Component[] | null>(null);
   const [hover, setHover] = useState<XY | null>(null);
@@ -237,13 +238,13 @@ export default function CanvasEditor(p: Props) {
     setZoom(next);
   }
   function down(e: Konva.KonvaEventObject<MouseEvent>) {
-    if (e.target.attrs.vertex) return;
     const raw = stageRef.current?.getPointerPosition();
-    if ((space || e.evt.button === 1) && raw) {
+    if (((panning && e.evt.button === 0) || e.evt.button === 1) && raw) {
       e.evt.preventDefault();
       setDragPan({ ...raw, ox: pan.x, oy: pan.y });
       return;
     }
+    if (panning || e.target.attrs.vertex) return;
     const at = coord();
     if (
       !at ||
@@ -369,7 +370,7 @@ export default function CanvasEditor(p: Props) {
   }
   return (
     <div
-      className={`canvas-wrap tool-${p.tool} ${space ? "panning" : ""}`}
+      className={`canvas-wrap tool-${p.tool} ${panning ? "panning" : ""} ${dragPan ? "dragging" : ""}`}
       ref={container}
     >
       <Stage
@@ -600,7 +601,7 @@ export default function CanvasEditor(p: Props) {
                 rings(component).map((ring, ri) => (
                   <Group key={`${ci}-${ri}`}>
                     <Line
-                      listening={!space}
+                      listening={!panning}
                       points={flat(ring)}
                       closed
                       stroke="#faf5da"
@@ -623,14 +624,14 @@ export default function CanvasEditor(p: Props) {
                           <Circle
                             key={vi}
                             vertex
-                            listening={!space}
+                            listening={!panning}
                             x={point[0]}
                             y={point[1]}
                             radius={(selected ? 5 : 3.5) / scale}
                             fill={selected ? "#eed5a0" : "#fffef4"}
                             stroke="#544d39"
                             strokeWidth={1 / scale}
-                            draggable={!p.busy && !space}
+                            draggable={!p.busy && !panning}
                             onMouseDown={(e) => {
                               e.cancelBubble = true;
                               p.onVertex(v);
@@ -708,7 +709,7 @@ export default function CanvasEditor(p: Props) {
         </button>
       </div>
       <div className="canvas-instruction">
-        {space
+        {panning
           ? "Drag to pan"
           : p.tool === "polygon"
             ? activePolygon?.closed
