@@ -1,11 +1,11 @@
-# Local validation · October 1, 2026
+# Local validation · October 2, 2026
 
 Hardware: MacBook Pro M4 Max, 128 GB, macOS 27.0.1. Isolated Python 3.12.14 environment.
 
 ## Completed checks
 
-- `python -m pytest -q`: **142 passing tests** covering persistence, geometry, COCO, API, SAM 3 contracts, polygon drafts, mask-seeded refinement, translation, and explicit hole cleanup.
-- `npm run test`: **33 passing tests** covering masks, autosave, conflicts, stale responses, polygon workflows, English interface controls, hole cleanup with undo/redo, and real React Konva rendering.
+- `python -m pytest -q`: **194 passing tests** covering persistence, geometry, COCO, API, SAM 3 contracts, polygon drafts, mask-seeded refinement, translation, hole cleanup, and visual-reference uploads and inference contracts.
+- `npm run test`: **42 passing tests** covering masks, autosave, conflicts, stale responses, polygon workflows, English interface controls, hole cleanup, real React Konva rendering, and visual-reference selection and searches.
 - `npm run build`: TypeScript compilation and the Vite production build pass.
 - `node --experimental-strip-types --test tests/frontend-masks.mjs`: **6 passing tests**. Fixtures encoded by pycocotools are compared pixel by pixel with the browser decoder.
 - `pip check`: no incompatible dependencies reported in the current installed environment.
@@ -85,6 +85,24 @@ The explicit **Fill small holes** action uses an adjustable area threshold in or
 Chrome validation used a separate QA project referencing the original image. Cleanup filled exactly eight pixels, removed all four tiny holes and their interior handles, and retained every foreground pixel. The exported COCO reconstructed the cleaned mask pixel for pixel. Undo recovered the complete original annotation, including editing controls. Redo and reload retained the cleaned result; another cleanup was an exact no-op.
 
 The original project was restored after testing. All seven original image states and project metadata remained equal to the pre-test baseline. Local evidence: `output/qa/hole-cleanup/verification.json`, `target-before.json`, `target-cleaned.json`, and screenshots `output/playwright/hole-cleanup-before.png` / `hole-cleanup-after.png`.
+
+## Visual examples · October 2, 2026
+
+SAM 3's native exemplar API takes boxes in the image being segmented. [Meta's response on cross-image reuse](https://github.com/facebookresearch/sam3/issues/183) states that it is not officially supported. The new experimental path encodes a box in a separate reference image, combines its geometry tokens with the optional text tokens, and supplies them to the detector for the target image. It uses the installed Transformers 5.18 components and official weights, without hooks, model mutation, extra models, or a reference/target collage.
+
+On the M4 Max with real MPS inference, native box prompting and the transferred-token path on the **same image** produced identical raw masks, boxes, logits, and presence logits: maximum absolute difference **0**. This verifies the assembly of the prompt tokens on this example, not general cross-image recognition quality.
+
+For genuinely different source images, a carrot in `sample/images/1047.jpg`, selected with `[38, 57, 170, 119]`, produced **9 proposals** on `1001.jpg`; adding `carrot` produced **20**. Visual inspection found carrot regions with some fragmented boundaries. The cached visual-only request took 142 ms at the engine level in one run, excluding HTTP, contour extraction, and rendering; this is not a latency distribution.
+
+**Quality controls exposed failures.** A potato from `1190.jpg`, selected with `[83, 25, 158, 91]`, produced **8 false positives** on the carrot image. A tightly cropped carrot upload with a full-image box selected background at approximately 99% confidence. Padding the reference did not reliably fix this and is not part of the engine. The interface therefore requires an explicit object box, displays the experimental limitation, and never accepts proposals automatically. Box selection alone does not guarantee correct concept recognition.
+
+Click refinement completed using both cached detector logits and a persisted binary RLE. Both returned masks at the target's 224 × 224 resolution. In one demanding adjacent-click case, the cached path included the positive point and excluded the negative; the RLE-seeded path did not exclude the negative. Those outputs differed by 4,850 pixels (agreement IoU 0.259, not accuracy against ground truth). This is a limitation of continued model refinement from a binary seed; reopening without new inference preserves the saved mask exactly.
+
+Chrome checks exercised upload, required box selection, visual-only inference, accepting two proposals together, refining a third with positive/negative clicks, Enter confirmation, image navigation, reload, and COCO export. All three saved annotations and the six remaining proposals were recovered unchanged; COCO reconstructed the annotation masks pixel for pixel. A subsequent reference + Spanish `zanahoria` search displayed `carrot`, produced 20 proposals, and retained the three existing annotations. The reference remained available across image navigation and cleared on reload as documented. The original sample project files remained unchanged. At widths of 1024, 1440, and 1920 pixels, the prompt stayed outside the canvas without horizontal page overflow.
+
+Automated checks cover invalid/corrupt/animated files, raw base64 and byte/pixel limits (including streamed requests), EXIF orientation, RGB/RGBA/LA/palette transparency, crop coordinates, class/project isolation, reference-only and combined prompts, target-only refinement caches, long prompts, canceled uploads, old responses after changing references or projects, modal keyboard isolation, and ordinary proposal acceptance. Transparent pixels are composited onto the same white background used in the preview.
+
+Evidence: `output/qa/visual-reference/report.json`, `review.json`, overlays and RLE manifests; `output/qa/visual-ui/verification.json`, saved states and exported COCO; screenshots under `output/playwright/visual-*.png`. The model report separates successful execution from failed quality controls. Reproduce with `scripts/benchmark_visual.py --help`; its inputs are user-provided images, not fixtures shipped in the repository. This new inference path was exercised on MPS; CPU/CUDA/WSL behavior has not been revalidated for it.
 
 ## Remaining validation
 

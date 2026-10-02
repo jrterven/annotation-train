@@ -75,6 +75,7 @@ class Sam3Engine:
         self._tracker_cache: OrderedDict = OrderedDict()
         self._seed_cache: OrderedDict = OrderedDict()
         self._part_cache: OrderedDict = OrderedDict()
+        self._reference_cache: OrderedDict = OrderedDict()
         self._device: str | None = None
         self._fallback_reason: str | None = None
         self.last_timings: dict[str, float] = {}
@@ -171,6 +172,7 @@ class Sam3Engine:
         self._tracker_cache.clear()
         self._part_cache.clear()
         self._seed_cache.clear()
+        self._reference_cache.clear()
 
     def _release_models(self) -> None:
         self._clear_caches()
@@ -237,15 +239,18 @@ class Sam3Engine:
         self.last_timings["embedding_seconds"] = time.perf_counter() - started
         return embeddings
 
-    def _detector_embeddings(self, image: Image.Image, key: tuple):
-        cached = self._get(self._detector_cache, key)
+    def _detector_embeddings(self, image: Image.Image, key: tuple, *, role: str = "target"):
+        # An uploaded reference and an annotation target never share cache slots,
+        # even if a caller happens to give them the same external image ID.
+        cache_key = (role, key)
+        cached = self._get(self._detector_cache, cache_key)
         if cached is not None:
             self.last_timings["embedding_seconds"] = 0.0
             return cached
         started = time.perf_counter()
         inputs = self._detector_processor(images=image, return_tensors="pt")
         embeddings = self._detector.get_vision_features(inputs["pixel_values"].to(self._device))
-        self._put(self._detector_cache, key, embeddings, self.cache_size)
+        self._put(self._detector_cache, cache_key, embeddings, self.cache_size)
         self.last_timings["embedding_seconds"] = time.perf_counter() - started
         return embeddings
 
@@ -377,6 +382,14 @@ class Sam3Engine:
     def _predict_text(self, image, key, text):
         started = time.perf_counter()
         self.last_timings = {}
+        inputs = self._text_inputs(text)
+        embeddings = self._detector_embeddings(image, key)
+        outputs = self._detector(vision_embeds=embeddings, **self._device_inputs(inputs))
+        proposals = self._concept_proposals(outputs, image, key)
+        self.last_timings["total_seconds"] = time.perf_counter() - started
+        return proposals
+
+    def _text_inputs(self, text: str):
         inputs = self._detector_processor(text=text, return_tensors="pt")
         # Sam3Processor pads to 32 tokens but deliberately does not truncate.
         # Character count alone cannot protect the text encoder's position table.
@@ -386,8 +399,114 @@ class Sam3Engine:
                 f"The description is too long for SAM 3 (maximum {max_tokens} tokens). "
                 "Use a shorter description."
             )
-        embeddings = self._detector_embeddings(image, key)
-        outputs = self._detector(vision_embeds=embeddings, **self._device_inputs(inputs))
+        return inputs
+
+    @staticmethod
+    def _combine_concept_prompts(text_features, text_mask, geometry_features, geometry_mask):
+        """Pure tensor assembly matching Sam3Model's native box-prompt branch.
+
+        Transformers 5.18 reads text_embeds.pooler_output directly and uses it as
+        the complete downstream prompt sequence. Supplying the already combined
+        sequence avoids hooks, model mutation, and any reference/target collage.
+        """
+        import torch
+        from transformers.modeling_outputs import BaseModelOutputWithPooling
+
+        if text_features.ndim != 3 or geometry_features.ndim != 3:
+            raise ModelUnavailable("SAM 3 returned an incompatible visual prompt shape.")
+        if text_features.shape[0] != geometry_features.shape[0] or text_features.shape[-1] != geometry_features.shape[-1]:
+            raise ModelUnavailable("SAM 3 returned incompatible text and visual prompt features.")
+        if text_mask is None:
+            text_mask = torch.ones(text_features.shape[:2], device=text_features.device, dtype=torch.bool)
+        if geometry_mask is None:
+            geometry_mask = torch.ones(geometry_features.shape[:2], device=geometry_features.device, dtype=torch.bool)
+        if text_mask.shape != text_features.shape[:2] or geometry_mask.shape != geometry_features.shape[:2]:
+            raise ModelUnavailable("SAM 3 returned an incompatible visual prompt attention mask.")
+        features = torch.cat([text_features, geometry_features], dim=1)
+        mask = torch.cat([text_mask.bool(), geometry_mask.bool()], dim=1)
+        if not torch.isfinite(features).all():
+            raise ModelUnavailable("SAM 3 returned invalid numeric values in the visual reference.")
+        return BaseModelOutputWithPooling(pooler_output=features), mask
+
+    def predict_visual(
+        self, image: Image.Image, image_key: str, reference: Image.Image,
+        reference_box: list[float] | tuple[float, ...] | None = None,
+        text: str | None = None,
+    ) -> list[dict]:
+        """Find target instances using an external reference and optional text.
+
+        Cross-image reuse is an experimental adaptation of SAM 3's intra-image
+        exemplar encoder, not a native separate-reference processor argument.
+        The reference raster must already have its intended EXIF orientation;
+        box coordinates are measured in that raster, before model resizing.
+        """
+        if not isinstance(reference, Image.Image) or not isinstance(image, Image.Image):
+            raise ValueError("The target and visual reference must be images.")
+        if text is not None and not isinstance(text, str):
+            raise ValueError("The concept must be text.")
+        concept = text.strip() if text is not None else ""
+        if len(concept) > 256:
+            raise ValueError("Enter a concept containing at most 256 characters.")
+        concept = concept or "visual"
+        reference = reference.convert("RGB")
+        image = image.convert("RGB")
+        if min(reference.size) <= 0 or min(image.size) <= 0:
+            raise ValueError("The target and visual reference must have positive dimensions.")
+        raw_box = reference_box if reference_box is not None else [0, 0, reference.width, reference.height]
+        _, box = self._validate_part({"box": raw_box}, reference.width, reference.height)
+        key = self._image_key(image, image_key)
+        reference_key = self._image_key(reference, "visual-reference")
+        return self._execute(lambda: self._predict_visual(image, key, reference, reference_key, box, concept))
+
+    def _reference_prompt(self, reference, reference_key, box):
+        cache_key = (reference_key, box)
+        cached = self._get(self._reference_cache, cache_key)
+        if cached is not None:
+            self.last_timings["reference_seconds"] = 0.0
+            return cached
+        started = time.perf_counter()
+        inputs = self._detector_processor(
+            original_sizes=[[reference.height, reference.width]], input_boxes=[[list(box)]],
+            input_boxes_labels=[[1]], return_tensors="pt",
+        )
+        inputs = self._device_inputs(inputs)
+        embeddings = self._detector_embeddings(reference, reference_key, role="reference")
+        geometry = self._detector.geometry_encoder(
+            box_embeddings=inputs["input_boxes"],
+            box_mask=inputs["input_boxes_labels"] != -10,
+            box_labels=inputs["input_boxes_labels"],
+            img_feats=embeddings.fpn_hidden_states[:-1],
+            img_pos_embeds=embeddings.fpn_position_encoding[:-1],
+        )
+        if not self._torch.isfinite(geometry.last_hidden_state).all():
+            raise ModelUnavailable("SAM 3 returned invalid numeric values in the visual reference.")
+        result = (geometry.last_hidden_state.detach(), geometry.attention_mask.detach())
+        self._put(self._reference_cache, cache_key, result, self.cache_size * 4)
+        self.last_timings["reference_seconds"] = time.perf_counter() - started
+        return result
+
+    def _visual_outputs(self, image, key, reference, reference_key, box, text):
+        inputs = self._device_inputs(self._text_inputs(text))
+        geometry_features, geometry_mask = self._reference_prompt(reference, reference_key, box)
+        text_features = self._detector.get_text_features(**inputs, return_dict=True).pooler_output
+        combined, attention_mask = self._combine_concept_prompts(
+            text_features, inputs.get("attention_mask"), geometry_features, geometry_mask,
+        )
+        target_embeddings = self._detector_embeddings(image, key)
+        return self._detector(
+            vision_embeds=target_embeddings, text_embeds=combined, attention_mask=attention_mask,
+        )
+
+    def _predict_visual(self, image, key, reference, reference_key, box, text):
+        started = time.perf_counter()
+        self.last_timings = {}
+        outputs = self._visual_outputs(image, key, reference, reference_key, box, text)
+        proposals = self._concept_proposals(outputs, image, key)
+        self.last_timings["total_seconds"] = time.perf_counter() - started
+        return proposals
+
+    def _concept_proposals(self, outputs, image: Image.Image, key: tuple) -> list[dict]:
+        """Postprocess target masks and retain their logits for click refinement."""
         if (not self._torch.isfinite(outputs.pred_masks).all()
                 or not self._torch.isfinite(outputs.pred_logits).all()
                 or (outputs.presence_logits is not None and not self._torch.isfinite(outputs.presence_logits).all())):
@@ -413,5 +532,4 @@ class Sam3Engine:
                 self._put(self._seed_cache, (key, _mask_digest(mask)), logits, 128)
                 proposals.append({"mask": mask, "score": float(score)})
         proposals.sort(key=lambda proposal: proposal["score"], reverse=True)
-        self.last_timings["total_seconds"] = time.perf_counter() - started
         return proposals

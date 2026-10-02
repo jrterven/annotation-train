@@ -56,6 +56,8 @@ import { useWorkspace } from "./persistence";
 import CanvasEditor from "./CanvasEditor";
 import type { Vertex } from "./CanvasEditor";
 import { FileBrowser, ProjectDialog } from "./ProjectDialog";
+import VisualReference from "./VisualReference";
+import type { VisualExample } from "./VisualReference";
 const PALETTE = [
   "#7856e8",
   "#16a577",
@@ -139,6 +141,11 @@ export default function App() {
   const [opacity, setOpacity] = useState(0.65);
   const [text, setText] = useState("");
   const [promptLanguage, setPromptLanguage] = useState<"en" | "es">("en");
+  const [visualExample, setVisualExample] = useState<VisualExample | null>(
+    null,
+  );
+  const [visualDialogOpen, setVisualDialogOpen] = useState(false);
+  const visualRevision = useRef(0);
   const [textPrompts, setTextPrompts] = useState<Record<number, TextPrompt>>(
     {},
   );
@@ -217,6 +224,9 @@ export default function App() {
     setQuery("");
     setTextPrompts({});
     setText("");
+    setVisualExample(null);
+    visualRevision.current++;
+    setVisualDialogOpen(false);
     setProjectDialog(false);
   }
   useEffect(() => {
@@ -629,15 +639,35 @@ export default function App() {
       setConfirming(false);
     }
   }
+  function cancelProposalSearches() {
+    visualRevision.current++;
+    for (const [key, request] of pending.current) {
+      if (request.kind === "text") {
+        request.controller.abort();
+        pending.current.delete(key);
+      }
+    }
+    invalidate();
+  }
+  function changeVisualExample(value: VisualExample | null) {
+    cancelProposalSearches();
+    setVisualExample(value);
+  }
   async function inferText() {
-    if (imageId === null || !state || !text.trim() || !categoryRequired())
+    if (
+      imageId === null ||
+      !state ||
+      (!text.trim() && !visualExample) ||
+      !categoryRequired()
+    )
       return;
     const id = imageId,
       key = `text:${id}`;
     pending.current.get(key)?.controller.abort();
     const controller = new AbortController(),
       token = uid(),
-      currentSession = sessionToken.current;
+      currentSession = sessionToken.current,
+      referenceRevision = visualRevision.current;
     pending.current.set(key, { controller, token, imageId: id, kind: "text" });
     invalidate();
     try {
@@ -647,7 +677,7 @@ export default function App() {
         proposals: Proposal[];
         prompt?: TextPrompt;
       }>(
-        "/infer/text",
+        visualExample ? "/infer/visual" : "/infer/text",
         "POST",
         {
           image_id: id,
@@ -655,12 +685,21 @@ export default function App() {
           text: text.trim(),
           source_language: promptLanguage,
           category_id: categoryId,
+          ...(visualExample
+            ? {
+                reference_image: visualExample.base64,
+                ...(visualExample.box
+                  ? { reference_box: visualExample.box }
+                  : {}),
+              }
+            : {}),
         },
         controller.signal,
       );
       if (
         pending.current.get(key)?.token !== token ||
         currentSession !== sessionToken.current ||
+        referenceRevision !== visualRevision.current ||
         result.image_id !== id
       )
         return;
@@ -681,12 +720,17 @@ export default function App() {
       }
       if (!result.proposals.length)
         setToast(
-          usedPrompt?.source_language === "es"
-            ? `No objects found for “${usedPrompt.english}”. Try a different description.`
-            : "No objects found. Try a short description in English.",
+          visualExample
+            ? "No objects found for this visual example. Try a tighter crop or add a short description."
+            : usedPrompt?.source_language === "es"
+              ? `No objects found for “${usedPrompt.english}”. Try a different description.`
+              : "No objects found. Try a short description in English.",
         );
     } catch (e) {
-      if (!(e instanceof Error && e.name === "AbortError"))
+      if (
+        pending.current.get(key)?.token === token &&
+        !(e instanceof Error && e.name === "AbortError")
+      )
         setToast(`SAM 3: ${errorText(e)}`);
     } finally {
       if (pending.current.get(key)?.token === token)
@@ -971,7 +1015,14 @@ export default function App() {
         target.isContentEditable
       )
         return;
-      if (projectDialog || help || categoryDialog || relink || conflictDialog)
+      if (
+        projectDialog ||
+        help ||
+        categoryDialog ||
+        relink ||
+        conflictDialog ||
+        visualDialogOpen
+      )
         return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "s") {
@@ -1323,7 +1374,7 @@ export default function App() {
                 {currentImage && state && (
                   <form
                     className="text-prompt-bar"
-                    aria-label="Text segmentation"
+                    aria-label="Concept segmentation"
                     onSubmit={(e) => {
                       e.preventDefault();
                       void inferText();
@@ -1344,13 +1395,24 @@ export default function App() {
                     </select>
                     <input
                       aria-label="Object to segment"
-                      placeholder={`Object to segment (in ${promptLanguage === "es" ? "Spanish" : "English"})`}
+                      placeholder={
+                        visualExample
+                          ? "Optional description"
+                          : `Object to segment (in ${promptLanguage === "es" ? "Spanish" : "English"})`
+                      }
                       value={text}
                       onChange={(e) => setText(e.target.value)}
                     />
+                    <VisualReference
+                      value={visualExample}
+                      scope={`${project.directory}:${sessionToken.current}:${imageId}`}
+                      onChange={changeVisualExample}
+                      onPickStart={cancelProposalSearches}
+                      onOpenChange={setVisualDialogOpen}
+                    />
                     <button
                       type="submit"
-                      disabled={!text.trim() || textBusy}
+                      disabled={(!text.trim() && !visualExample) || textBusy}
                       title="Generate proposals with SAM 3"
                       aria-label="Generate proposals with SAM 3"
                     >

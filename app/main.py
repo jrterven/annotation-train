@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import io
+import math
 import os
 import threading
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -13,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from PIL import Image
+from PIL import Image, ImageOps, UnidentifiedImageError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -24,8 +28,54 @@ from .translation import PromptTranslator, TranslationUnavailable
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+MAX_REFERENCE_BYTES = 10 * 1024 * 1024
+MAX_REFERENCE_PIXELS = 16_000_000
+MAX_REFERENCE_BASE64 = 4 * ((MAX_REFERENCE_BYTES + 2) // 3)
+MAX_VISUAL_REQUEST_BYTES = MAX_REFERENCE_BASE64 + 16 * 1024
+
+
+class VisualUploadLimitMiddleware:
+    """Bound the visual prompt JSON before FastAPI buffers or parses it."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope["type"] != "http" or scope.get("method") != "POST"
+                or scope.get("path", "").rstrip("/") != "/api/infer/visual"):
+            await self.app(scope, receive, send)
+            return
+        chunks = []
+        length = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            length += len(chunk)
+            if length > MAX_VISUAL_REQUEST_BYTES:
+                response = JSONResponse({"detail": "The example image exceeds the 10 MiB upload limit."}, status_code=413)
+                await response(scope, receive, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
 app = FastAPI(title="Annotation and Training", version="0.1.0")
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
+app.add_middleware(VisualUploadLimitMiddleware)
 ORIGINS = {"http://localhost:8765", "http://127.0.0.1:8765", "http://localhost:5173", "http://127.0.0.1:5173"}
 app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST", "PUT", "PATCH"], allow_headers=["Content-Type", "X-Requested-With", "X-Project-Directory"])
 engine = Sam3Engine()
@@ -151,6 +201,57 @@ class TextInput(BaseModel):
     text: str = Field(min_length=1, max_length=300)
     category_id: int
     source_language: Literal["en", "es"] = "en"
+
+
+class VisualInput(BaseModel):
+    image_id: int = Field(strict=True)
+    revision: int = Field(ge=0, strict=True)
+    category_id: int = Field(strict=True)
+    text: str = Field(default="", max_length=300)
+    source_language: Literal["en", "es"] = "en"
+    reference_image: str = Field(min_length=1, max_length=MAX_REFERENCE_BASE64)
+    reference_box: list[Any] | None = Field(default=None, min_length=4, max_length=4)
+
+
+def decode_reference_image(encoded: str, box: list[Any] | None) -> tuple[Image.Image, list[float] | None]:
+    """Decode an uploaded example in memory; crop coordinates use its EXIF-oriented raster."""
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("The example image must contain valid raw base64 data.") from exc
+    if len(raw) > MAX_REFERENCE_BYTES:
+        raise HTTPException(413, "The example image exceeds the 10 MiB upload limit.")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as candidate:
+                if candidate.format not in {"PNG", "JPEG", "WEBP"}:
+                    raise ValueError("Use a PNG, JPEG or WebP example image.")
+                if candidate.width * candidate.height > MAX_REFERENCE_PIXELS:
+                    raise HTTPException(413, "The example image exceeds the 16 megapixel limit.")
+                if getattr(candidate, "is_animated", False) or getattr(candidate, "n_frames", 1) != 1:
+                    raise ValueError("Use a single still image as the example; animated images are not supported.")
+                candidate.verify()
+            with Image.open(io.BytesIO(raw)) as candidate:
+                oriented = ImageOps.exif_transpose(candidate)
+                # Match the preview's white background instead of exposing RGB
+                # values hidden behind transparent PNG/WebP pixels.
+                if "A" in oriented.getbands() or "transparency" in oriented.info:
+                    background = Image.new("RGBA", oriented.size, "white")
+                    reference = Image.alpha_composite(background, oriented.convert("RGBA")).convert("RGB")
+                else:
+                    reference = oriented.convert("RGB")
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise HTTPException(413, "The example image exceeds the 16 megapixel limit.") from exc
+    except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise ValueError("The example image is invalid or damaged.") from exc
+    if box is not None:
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in box):
+            raise ValueError("The example box must contain four finite numeric coordinates.")
+        box = [float(value) for value in box]
+        if not (0 <= box[0] < box[2] <= reference.width and 0 <= box[1] < box[3] <= reference.height):
+            raise ValueError("The example box must have area and lie inside the oriented example image.")
+    return reference, box
 
 
 class ImportInput(BaseModel):
@@ -317,6 +418,40 @@ async def infer_text(body: TextInput, request: Request):
         raise HTTPException(503, f"SAM 3 search failed: {exc}") from exc
     return {"image_id": body.image_id, "revision": body.revision, "proposals": proposals,
             "prompt": {"original": body.text, "english": english, "source_language": body.source_language}}
+
+
+@app.post("/api/infer/visual")
+async def infer_visual(body: VisualInput, request: Request):
+    project = store(request)
+    if not any(c["id"] == body.category_id for c in project.project()["categories"]):
+        raise ValueError("Select a valid class.")
+    image = await run_in_threadpool(read_image, project, body.image_id)
+    reference, box = await run_in_threadpool(decode_reference_image, body.reference_image, body.reference_box)
+    key = f"{project.project()['directory']}:{body.image_id}:{project.image_path(body.image_id).stat().st_mtime_ns}"
+    prompt = None
+    try:
+        english = None
+        if body.text.strip():
+            english = await run_in_threadpool(translator.translate, body.text, body.source_language)
+            prompt = {"original": body.text, "english": english, "source_language": body.source_language}
+        results = await run_in_threadpool(engine.predict_visual, image, key, reference, reference_box=box, text=english)
+        proposals = []
+        for prediction in results:
+            payload = await run_in_threadpool(mask_payload, prediction["mask"])
+            proposals.append({"id": str(uuid.uuid4()), "category_id": body.category_id, "iscrowd": 0,
+                              "score": float(prediction["score"]), "selected": True, **payload})
+    except ValueError:
+        raise
+    except TranslationUnavailable as exc:
+        raise HTTPException(503, f"Prompt translation failed: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(503, f"SAM 3 visual search failed: {exc}") from exc
+    result = {"image_id": body.image_id, "revision": body.revision, "proposals": proposals,
+              "reference": {"width": reference.width, "height": reference.height},
+              "method": "cross_image_exemplar"}
+    if prompt is not None:
+        result["prompt"] = prompt
+    return result
 
 
 @app.post("/api/coco/import")

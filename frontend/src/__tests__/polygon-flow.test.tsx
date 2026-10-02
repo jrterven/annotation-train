@@ -454,7 +454,7 @@ describe("polygon to SAM application flow", () => {
 describe("annotation toolbar", () => {
   it("submits the selected prompt language outside the canvas and keeps translations with their image", async () => {
     await boot();
-    const form = screen.getByRole("form", { name: "Text segmentation" });
+    const form = screen.getByRole("form", { name: "Concept segmentation" });
     expect(form.closest(".editor-toolbar")).not.toBeNull();
     expect(form.closest(".canvas-area")).toBeNull();
     const language = screen.getByRole("combobox", { name: "Prompt language" });
@@ -520,7 +520,7 @@ describe("annotation toolbar", () => {
       screen.getByRole("textbox", { name: "Object to segment" }),
       { target: { value: "zanahorias" } },
     );
-    fireEvent.submit(screen.getByRole("form", { name: "Text segmentation" }));
+    fireEvent.submit(screen.getByRole("form", { name: "Concept segmentation" }));
     await screen.findByText(
       "No objects found for “carrots”. Try a different description.",
     );

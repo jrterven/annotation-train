@@ -1,6 +1,6 @@
 # Annotation and Training
 
-A local web application for image instance segmentation with **SAM 3**. Annotate with text, positive/negative clicks, boxes, or an approximate polygon; refine masks, edit vertices, and import/export COCO. The interface is in English. Images, prompts, and annotations are processed locally.
+A local web application for image instance segmentation with **SAM 3**. Annotate with text, visual examples (experimental), positive/negative clicks, boxes, or an approximate polygon; refine masks, edit vertices, and import/export COCO. The interface is in English. Images, prompts, and annotations are processed locally.
 
 Built with React, TypeScript, React Konva, FastAPI, PyTorch, and SQLite.
 
@@ -218,6 +218,21 @@ The top toolbar contains the text prompt and a **Prompt language** selector. Cho
 Spanish prompts are translated to English locally with the public [Helsinki-NLP/opus-mt-es-en model](https://huggingface.co/Helsinki-NLP/opus-mt-es-en), licensed under [Apache 2.0](https://huggingface.co/Helsinki-NLP/opus-mt-es-en/blob/main/README.md). The first Spanish request downloads approximately **312 MB**; translation then runs on CPU using cached weights, including offline. It is free to run locally and requires no translation API key or per-request payment. This is separate from the gated SAM 3 access above.
 
 The English text sent to SAM is displayed with the results so you can review it. Translation can change the intended meaning: if needed, select English, edit the wording, and run the search again. English prompts bypass translation. Images and prompt text are not sent to a translation service.
+
+### Visual examples (experimental)
+
+1. Click **Upload visual example** next to the text prompt and choose a PNG, JPEG, or WebP image (up to 10 MiB and 16 megapixels).
+2. Drag a box around one example object in the preview, then click **Use example**. The box is required; keep some surrounding context in the uploaded photo.
+3. Generate proposals with the reference alone, or add a short text description to narrow the concept. The language selector applies to this optional text.
+4. Select and accept matching proposals, or refine one with positive/negative clicks before confirming it.
+
+![Selecting an object in an uploaded visual example before generating SAM 3 proposals](docs/screenshots/visual-reference.png)
+
+The example stays available as you navigate images. Remove it to return to text-only searches. The uploaded file is held in memory and processed by the local backend; it is not copied into the image directory or stored in the project. Select it again after reloading the page or opening another project. Generated proposals and accepted annotations use the normal autosave and COCO workflows. EXIF orientation is respected, and transparent pixels are composited on white in both the preview and inference.
+
+SAM 3 officially supports [visual exemplars specified by boxes within an image](https://huggingface.co/docs/transformers/model_doc/sam3#single-bounding-box-prompt). This app adapts that mechanism for a **separate reference image**: it encodes the example with SAM 3's geometry encoder and supplies those prompt features to the target-image detector. This is an experimental application extension, not a native `reference_image` argument in Transformers; [Meta does not officially support cross-image reuse](https://github.com/facebookresearch/sam3/issues/183). It uses the same official weights, without an additional model or training.
+
+Review every proposal. The adaptation can miss matching objects or return unrelated ones, even with high confidence. Local tests found carrot proposals from a carrot reference, but also false positives from a potato reference. An example cropped to the image borders sometimes selected background. Keeping surrounding context and marking the object worked better on this sample, but does not ensure correct concept recognition. See [VALIDATION.md](VALIDATION.md) for measured checks and limitations.
 
 ### Keyboard shortcuts
 
