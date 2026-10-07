@@ -65,6 +65,12 @@ and preloads one next image after the current image finishes. Session/project
 changes clear this cache, including pending requests; no persistent browser
 storage or public/shared HTTP caching is used.
 
+Hosted state reads, saves and inference admission omit derived PNG mask previews:
+the editor already renders the exact RLE masks. This avoids regenerating every
+full-resolution overlay under the quota lock during image navigation or each
+new prompt. Original masks, contours, controls and revisions are unchanged;
+the local API retains its existing preview response contract.
+
 ## Large source images
 
 Project originals have no fixed byte or megapixel ceiling. The account/global

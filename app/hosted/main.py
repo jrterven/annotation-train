@@ -380,14 +380,16 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
     def get_state(project_id: str, image_id: int, request: Request):
         with owned(request, project_id) as (session, project, store):
             image_record(session, project_id, image_id)
-            return store.get_state(image_id)
+            # The editor renders exact RLE masks itself. Encoding full-image
+            # PNG previews here delays navigation and holds the quota lock.
+            return store.get_state(image_id, include_previews=False)
 
     @app.put("/api/v1/projects/{project_id}/images/{image_id}/state")
     def save_state(project_id: str, image_id: int, body: dict[str, Any], request: Request):
         def save_staged(store, session, project):
             image = image_record(session, project_id, image_id)
             validate_mask_dimensions(body, image)
-            return store.save_state(image_id, body)
+            return store.save_state(image_id, body, include_previews=False)
         return mutate_project(settings, db, objects, project_id, auth.user_for_request(request), save_staged)
 
     @app.post("/api/v1/projects/{project_id}/categories")
@@ -435,7 +437,7 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
         with owned(request, project_id) as (session, project, store):
             image = image_record(session, project_id, body.image_id)
             validate_mask_dimensions(body.model_dump(), image)
-            state = store.get_state(body.image_id)
+            state = store.get_state(body.image_id, include_previews=False)
             if state["revision"] != body.revision:
                 raise HTTPException(409, "Image revision changed; reload before inference")
             if kind != "points" and body.category_id not in {c["id"] for c in store.project()["categories"]}:
@@ -490,8 +492,8 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             raise ValueError("A COCO instance dataset is required")
         def import_staged(store, session, project):
             current = store.project()
-            if current["categories"] or any(store.get_state(i["id"])["annotations"] or store.get_state(i["id"])["draft"]
-                    or store.get_state(i["id"])["proposals"] for i in current["images"]):
+            states = (store.get_state(i["id"], include_previews=False) for i in current["images"])
+            if current["categories"] or any(s["annotations"] or s["draft"] or s["proposals"] for s in states):
                 raise HTTPException(409, "Import COCO before adding classes or annotations")
             records = {im.file_name: im for im in session.scalars(select(ImageObject).where(
                 ImageObject.project_id == project_id, ImageObject.status == "ready"))}

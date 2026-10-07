@@ -62,6 +62,37 @@ def project_and_image(client):
     return response.json()
 
 
+def test_hosted_state_and_inference_skip_unused_mask_previews(hosted, monkeypatch):
+    import numpy as np
+    from app.geometry import mask_payload
+
+    *_, clients = hosted
+    client = clients["alice"]
+    project = project_and_image(client)
+    path = f"/api/v1/projects/{project['id']}"
+    category = client.post(path + "/categories", json={"name": "Object", "color": "#33aa99"}).json()
+    state = client.get(path + "/images/1/state").json()
+    annotation = {"id": "saved-object", "category_id": category["id"], "iscrowd": 0,
+                  **mask_payload(np.ones((12, 16), dtype=bool))}
+    state["annotations"] = [annotation]
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("The hosted editor does not use PNG mask previews")
+
+    monkeypatch.setattr("app.storage.mask_preview", unexpected)
+    response = client.put(path + "/images/1/state", json=state)
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert "preview" not in saved["annotations"][0]
+    for key in ("mask", "components", "controls"):
+        assert saved["annotations"][0][key] == annotation[key]
+    assert client.get(path + "/images/1/state").json() == saved
+    response = client.post(path + "/infer/points", json={"image_id": 1, "revision": saved["revision"],
+                           "part": {"points": [{"x": 5, "y": 5, "label": 1}]}})
+    assert response.status_code == 202, response.text
+    assert clients["bob"].get(path + "/images/1/state").status_code == 404
+
+
 def test_hosted_config_fails_closed(hosted):
     settings, *_ = hosted
     for bad in [replace(settings, environment="prod"), replace(settings, database_url="sqlite://"),
