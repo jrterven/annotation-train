@@ -11,13 +11,12 @@ import warnings
 from typing import Any, Literal
 from uuid import UUID
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from app.images import Image
+from PIL import ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_REFERENCE_BYTES = 10 * 1024 * 1024
 MAX_PIXELS = 16_000_000
-MAX_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_RESULT_BYTES = 20 * 1024 * 1024
 MAX_RESULT_PIXELS = 1_024_000_000
 
@@ -72,7 +71,7 @@ class AttemptRequest(StrictModel):
     deadline_at: float = Field(gt=0)
     kind: Literal["points", "text", "visual"]
     payload: dict[str, Any]
-    image_base64: str = Field(min_length=1, max_length=4 * ((MAX_IMAGE_BYTES + 2) // 3))
+    image_base64: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_prompt(self):
@@ -89,12 +88,11 @@ class AttemptRequest(StrictModel):
 
 def decode_image(encoded: str, *, reference: bool = False) -> tuple[Image.Image, str]:
     """No filenames/URLs are accepted. Preserve the original target raster grid."""
-    limit = MAX_REFERENCE_BYTES if reference else MAX_IMAGE_BYTES
     try:
         data = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as error:
         raise ValueError("Image must contain raw base64 data.") from error
-    if not data or len(data) > limit:
+    if not data or (reference and len(data) > MAX_REFERENCE_BYTES):
         raise ValueError("Image exceeds the byte limit.")
     try:
         with warnings.catch_warnings():
@@ -103,7 +101,7 @@ def decode_image(encoded: str, *, reference: bool = False) -> tuple[Image.Image,
                 formats = {"PNG", "JPEG", "WEBP"} if reference else {"PNG", "JPEG", "WEBP", "BMP", "TIFF"}
                 if candidate.format not in formats or getattr(candidate, "n_frames", 1) != 1:
                     raise ValueError("Use a supported still image.")
-                if candidate.width * candidate.height > MAX_PIXELS:
+                if reference and candidate.width * candidate.height > MAX_PIXELS:
                     raise ValueError("Image exceeds the 16 megapixel limit.")
                 candidate.verify()
             with Image.open(io.BytesIO(data)) as candidate:

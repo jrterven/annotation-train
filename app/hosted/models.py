@@ -90,6 +90,7 @@ class UploadReservation(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"))
     bytes: Mapped[int] = mapped_column(BigInteger)
+    file_name: Mapped[str | None] = mapped_column(String(1024))
     expires_at: Mapped[datetime] = mapped_column(DateTime)
 
 

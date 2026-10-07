@@ -524,3 +524,28 @@ def test_expired_queue_refunds_and_scrubs_payload_without_touching_running_job(s
     assert again["expired_queued_jobs"] == 0
     with value.db.session() as session:
         assert session.scalar(select(InferenceUsage)).reserved == 2
+
+
+def test_chunked_upload_expiry_and_crash_leftovers_are_collected(setup):
+    from app.hosted.uploads import upload_lock
+    value, now = setup, utcnow()
+    expired, active, committed = [str(uuid4()) for _ in range(3)]
+    with value.db.session() as session:
+        session.get(User, value.uid).reserved_bytes = 30
+        session.get(ResourceCounter, 'global').reserved_bytes = 30
+        for uid, size, deadline in [(expired, 10, now - timedelta(seconds=1)), (active, 20, now + timedelta(hours=1))]:
+            session.add(UploadReservation(id=uid, user_id=value.uid, project_id=value.pid,
+                file_name='image.png', bytes=size, expires_at=deadline))
+    old = (now - timedelta(hours=25)).replace(tzinfo=timezone.utc).timestamp()
+    for uid in (expired, active, committed):
+        with upload_lock(value.settings, uid) as path:
+            path.write_bytes(b'partial')
+            os.utime(path, (old, old))
+            os.utime(path.with_suffix('.lock'), (old, old))
+    reconcile(value.settings, value.db, value.objects, now)
+    directory = value.settings.data_dir / 'uploads'
+    assert not (directory / f'{expired}.part').exists()
+    assert not (directory / f'{committed}.part').exists()
+    assert (directory / f'{active}.part').read_bytes() == b'partial'
+    with value.db.session() as session:
+        assert session.get(User, value.uid).reserved_bytes == 20

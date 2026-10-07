@@ -16,7 +16,7 @@ from typing import Any, Iterable
 import uuid
 
 import numpy as np
-from PIL import Image
+from .images import Image
 from pycocotools import mask as coco_mask
 
 from .geometry import (controls_for_components, decode_mask, encode_mask, mask_payload,
@@ -73,8 +73,6 @@ def _image_details(path: Path) -> dict:
         with Image.open(path) as image:
             width, height = image.size  # Deliberately do not apply EXIF transpose.
             image.verify()
-        if width * height > 150_000_000:
-            raise ValueError("The image exceeds the 150-megapixel limit.")
         digest = hashlib.sha256()
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):

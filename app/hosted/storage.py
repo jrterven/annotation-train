@@ -7,11 +7,12 @@ import io
 import os
 from pathlib import Path
 import tempfile
-import warnings
+import shutil
 
 import boto3
 from botocore.config import Config
-from PIL import Image, UnidentifiedImageError
+from app.images import Image
+from PIL import UnidentifiedImageError
 from sqlalchemy import select
 
 from app.storage import ProjectStore, _connection, _schema, _insert_image
@@ -66,7 +67,11 @@ class FilesystemStore:
     def put(self, key, data, content_type="application/octet-stream"):
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        if hasattr(data, "read"):
+            with path.open("wb") as output:
+                shutil.copyfileobj(data, output)
+        else:
+            path.write_bytes(data)
 
     def get(self, key):
         return self._path(key).read_bytes()
@@ -133,26 +138,26 @@ def create_project_store(settings, project_id, name):
     return ProjectStore(directory)
 
 
-def validate_image(data, settings):
-    if not data or len(data) > settings.max_upload_bytes:
-        raise ValueError("Images must contain at most 20 MiB")
+def validate_image(source, settings=None):
+    """Validate the complete original without imposing byte/pixel ceilings."""
+    stream = io.BytesIO(source) if isinstance(source, bytes) else source
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
-                if image.format not in {"PNG", "JPEG", "WEBP", "BMP", "TIFF"}:
-                    raise ValueError("Unsupported image format")
-                if image.width * image.height > settings.max_image_pixels:
-                    raise ValueError("Images must contain at most 16 megapixels")
-                if getattr(image, "n_frames", 1) != 1:
-                    raise ValueError("Only single still images are supported")
-                result = (image.width, image.height, Image.MIME.get(image.format, "application/octet-stream"))
-                image.verify()
-            with Image.open(io.BytesIO(data)) as image:
-                image.load()
+        stream.seek(0)
+        with Image.open(stream) as image:
+            if image.format not in {"PNG", "JPEG", "WEBP", "BMP", "TIFF"}:
+                raise ValueError("Unsupported image format")
+            if getattr(image, "n_frames", 1) != 1:
+                raise ValueError("Only single still images are supported")
+            result = (image.width, image.height, Image.MIME.get(image.format, "application/octet-stream"))
+            image.verify()
+        stream.seek(0)
+        with Image.open(stream) as image:
+            image.load()
         return result
-    except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ValueError("Invalid, damaged or oversized image") from exc
+    except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise ValueError("Invalid or damaged image") from exc
+    finally:
+        stream.seek(0)
 
 
 def get_image_bytes(db, objects, project_id, image_id):
@@ -168,7 +173,7 @@ def get_image_bytes(db, objects, project_id, image_id):
         return data
 
 
-def reserve_upload(db, settings, user_id, project_id, size):
+def reserve_upload(db, settings, user_id, project_id, size, file_name=None):
     from fastapi import HTTPException
     with db.session() as session:
         counter = db.global_lock(session)
@@ -183,7 +188,7 @@ def reserve_upload(db, settings, user_id, project_id, size):
         user.reserved_bytes += size
         counter.reserved_bytes += size
         reservation = UploadReservation(id=identity(), user_id=user_id, project_id=project_id,
-                                        bytes=size, expires_at=utcnow() + timedelta(hours=1))
+                                        bytes=size, file_name=file_name, expires_at=utcnow() + timedelta(hours=1))
         session.add(reservation)
         return reservation.id
 

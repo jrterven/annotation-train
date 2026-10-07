@@ -293,3 +293,14 @@ def test_expired_attempt_and_busy_worker_are_rejected(tmp_path):
         assert supervisor.process is None
     finally:
         supervisor.close()
+
+
+def test_worker_accepts_large_target_original_without_pixel_or_byte_ceiling():
+    source = io.BytesIO()
+    Image.new('RGB', (4097, 4096), 'red').save(source, format='BMP')
+    data = source.getvalue()
+    assert len(data) > 20 * 1024 * 1024
+    value = request(image_base64=base64.b64encode(data).decode('ascii'), sha256=hashlib.sha256(data).hexdigest())
+    image, digest = decode_image(value.image_base64)
+    assert image.size == (4097, 4096)
+    assert digest == value.sha256

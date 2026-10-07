@@ -16,15 +16,17 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
-from PIL import Image, ImageOps
+from app.images import Image
+from PIL import ImageOps
 from sqlalchemy import func, select
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 import httpx
 
 from app.geometry import decode_mask, fill_small_holes, mask_payload, rasterize_components, union_masks
-from app.storage import ProjectStore, RevisionConflict, _relative_file, IMAGE_EXTENSIONS
-from . import auth, jobs
+from app.storage import ProjectStore, RevisionConflict, _relative_file
+from . import auth, jobs, uploads
 from .quota import mutate_project, recover_project, recover_project_locked
 from .config import Settings
 from .database import Database
@@ -36,6 +38,11 @@ from .storage import (ObjectCache, R2Store, create_project_store, project_store,
 
 class ProjectInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
+
+
+class UploadInput(BaseModel):
+    file_name: str = Field(min_length=1, max_length=1024)
+    size: int = Field(gt=0, strict=True)
 
 
 class CategoryInput(BaseModel):
@@ -250,20 +257,15 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
                     jobs.finalize_quota(session, job, False)
         return {"ok": True}
 
-    @app.post("/api/v1/projects/{project_id}/images", status_code=201)
-    def upload_image(project_id: str, request: Request, file: UploadFile = File(...), relative_path: str = Form("")):
+    def commit_image(project_id, request, source, name, size, reservation_id):
         user_id = auth.user_for_request(request)
-        if not request.state.reservation_id:
-            raise HTTPException(400, "Invalid project identifier")
         if shutil.disk_usage(settings.data_dir).free < settings.min_free_disk_bytes:
             raise HTTPException(503, "Server storage is temporarily unavailable")
-        name = _relative_file(relative_path or file.filename)
-        if len(name) > 1024 or Path(name).suffix.lower() not in IMAGE_EXTENSIONS:
-            raise ValueError("Use a supported image filename with a relative path")
-        data = file.file.read(settings.max_upload_bytes + 1)
-        width, height, content_type = validate_image(data, settings)
-        digest = hashlib.sha256(data).hexdigest()
-        object_id = identity()
+        name = uploads.image_name(name)
+        width, height, content_type = validate_image(source)
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+        source.seek(0)
+        object_id = reservation_id
         key = f"projects/{project_id}/images/{object_id}/original"
         with db.session() as session:
             db.global_lock(session)
@@ -275,15 +277,16 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
                 raise HTTPException(409, "An image with this relative path already exists")
             image_id = (session.scalar(select(func.max(ImageObject.image_id)).where(ImageObject.project_id == project_id)) or 0) + 1
             record = ImageObject(id=object_id, project_id=project_id, image_id=image_id, file_name=name,
-                object_key=key, sha256=digest, size_bytes=len(data), width=width, height=height,
+                object_key=key, sha256=digest, size_bytes=size, width=width, height=height,
                 content_type=content_type, status="pending")
             session.add(record)
         try:
-            objects.put(key, data, content_type)
-            with Image.open(io.BytesIO(data)) as original:
+            objects.put(key, source, content_type)
+            source.seek(0)
+            with Image.open(source) as original:
                 # Keep original pixel grid, consistent with local annotations and COCO.
+                original.thumbnail((256, 192))
                 thumb = original.convert("RGB")
-                thumb.thumbnail((256, 192))
                 output = io.BytesIO()
                 thumb.save(output, format="PNG")
             objects.put(key.rsplit("/", 1)[0] + "/thumbnail.png", output.getvalue(), "image/png")
@@ -292,7 +295,7 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
                 record.thumbnail_bytes = len(output.getvalue())
                 register_image(store, record)
             mutate_project(settings, db, objects, project_id, user_id, register_staged,
-                           image_object_id=object_id, upload_reservation_id=request.state.reservation_id)
+                           image_object_id=object_id, upload_reservation_id=reservation_id)
         except Exception:
             # If the process dies, pending rows remain discoverable by the maintenance reconciler.
             try:
@@ -313,6 +316,44 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
         with owned(request, project_id) as (session, project, store):
             return dto(session, project, store)
 
+    @app.post("/api/v1/projects/{project_id}/images", status_code=201)
+    def upload_image(project_id: str, request: Request, file: UploadFile = File(...), relative_path: str = Form("")):
+        if not request.state.reservation_id:
+            raise HTTPException(400, "Invalid project identifier")
+        return commit_image(project_id, request, file.file, relative_path or file.filename,
+                            file.size, request.state.reservation_id)
+
+    @app.post("/api/v1/projects/{project_id}/uploads", status_code=201)
+    def begin_upload(project_id: str, body: UploadInput, request: Request):
+        return uploads.begin(settings, db, auth.user_for_request(request), project_id, body.file_name, body.size)
+
+    @app.put("/api/v1/projects/{project_id}/uploads/{upload_id}")
+    async def upload_chunk(project_id: str, upload_id: str, offset: int, request: Request):
+        return await run_in_threadpool(uploads.append, settings, db, auth.user_for_request(request),
+                                      project_id, upload_id, offset, await request.body())
+
+    @app.delete("/api/v1/projects/{project_id}/uploads/{upload_id}")
+    def abort_upload(project_id: str, upload_id: str, request: Request):
+        return uploads.abort(settings, db, auth.user_for_request(request), project_id, upload_id)
+
+    @app.post("/api/v1/projects/{project_id}/uploads/{upload_id}/complete", status_code=201)
+    def complete_upload(project_id: str, upload_id: str, request: Request):
+        user_id = auth.user_for_request(request)
+        # Completion is idempotent even if the first response was lost.
+        with owned(request, project_id) as (session, project, store):
+            record = session.get(ImageObject, upload_id)
+            if record and record.project_id == project_id and record.status == "ready":
+                return dto(session, project, store)
+        uploads.reservation_for(db, user_id, project_id, upload_id)
+        with uploads.upload_lock(settings, upload_id) as path:
+            row = uploads.reservation_for(db, user_id, project_id, upload_id, refresh=True)
+            if not path.exists() or path.stat().st_size != row.bytes:
+                raise HTTPException(409, "Upload is incomplete")
+            with path.open("rb") as source:
+                result = commit_image(project_id, request, source, row.file_name, row.bytes, upload_id)
+            path.unlink(missing_ok=True)
+            return result
+
     @app.get("/api/v1/projects/{project_id}/images/{image_id}/file")
     def image_file(project_id: str, image_id: int, request: Request, thumbnail: bool = False):
         with owned(request, project_id) as (session, project, store):
@@ -323,6 +364,7 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             data = cache.get(objects, key, record.sha256)
         with Image.open(io.BytesIO(data)) as original:
             output = io.BytesIO()
+            original.thumbnail((8192, 8192))
             original.convert("RGB").save(output, format="PNG")
         return Response(output.getvalue(), media_type="image/png")
 
@@ -435,7 +477,7 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
 
     @app.post("/api/v1/projects/{project_id}/coco/import")
     def import_coco(project_id: str, request: Request, file: UploadFile = File(...)):
-        source = json.loads(file.file.read(settings.max_upload_bytes + 1).decode("utf-8-sig"))
+        source = json.loads(file.file.read(settings.max_request_bytes + 1).decode("utf-8-sig"))
         if not isinstance(source, dict) or any(not isinstance(source.get(k), list) for k in ("images", "categories", "annotations")):
             raise ValueError("A COCO instance dataset is required")
         def import_staged(store, session, project):

@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from .images import Image
 from pycocotools import mask as coco_mask
 from shapely import box, intersects_xy, union_all
 from shapely.geometry import MultiPolygon, Polygon
@@ -32,8 +32,6 @@ def decode_mask(rle: dict) -> np.ndarray:
             or any(type(n) is not int or n <= 0 for n in size)):
         raise ValueError("RLE size must contain a positive height and width.")
     height, width = size
-    if height * width > 150_000_000:
-        raise ValueError("The mask exceeds the 150-megapixel limit.")
     # Validate runs ourselves before entering the C decoder. Invalid compressed
     # counts can otherwise read/write outside the expected allocation.
     if isinstance(counts, str):
@@ -96,7 +94,7 @@ def _ring(points: Any, width: int, height: int) -> list[tuple[float, float]]:
 def _validated_polygons(components: list[dict], width: int, height: int) -> list[Polygon]:
     if type(width) is not int or type(height) is not int or min(width, height) < 1:
         raise ValueError("Dimensions must be positive integers.")
-    if width * height > 150_000_000 or not isinstance(components, list):
+    if not isinstance(components, list):
         raise ValueError("Invalid geometry or dimensions.")
     polygons = []
     for component in components:
@@ -240,8 +238,8 @@ def fill_small_holes(mask: np.ndarray, max_area: int = 16) -> tuple[np.ndarray, 
     if type(max_area) is not int or not 1 <= max_area <= 150_000_000:
         raise ValueError("The hole area limit must be an integer from 1 to 150000000 pixels.")
     array = np.asarray(mask, dtype=bool)
-    if array.ndim != 2 or min(array.shape) < 1 or array.size > 150_000_000:
-        raise ValueError("The mask must be a nonempty 2D array of at most 150 megapixels.")
+    if array.ndim != 2 or min(array.shape) < 1:
+        raise ValueError("The mask must be a nonempty 2D array.")
     height, width = array.shape
     output = array.copy()
     # Subtracting exact pixel-cell geometry measures only background pixels,

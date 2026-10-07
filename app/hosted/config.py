@@ -24,8 +24,7 @@ class Settings:
     fallback_worker_token: str = field(default="", repr=False)
     storage_limit_bytes: int = 1_000_000_000
     global_storage_limit_bytes: int = 50_000_000_000
-    max_upload_bytes: int = 20 * 1024 * 1024
-    max_image_pixels: int = 16_000_000
+    max_request_bytes: int = 64 * 1024 * 1024
     max_mask_pixels_per_request: int = 1_024_000_000
     cache_limit_bytes: int = 5_000_000_000
     inference_limit: int = 300

@@ -30,6 +30,7 @@ from sqlalchemy.engine import make_url
 from fastapi import HTTPException
 
 from .config import Settings
+from .uploads import upload_lock
 from .database import Database
 from .jobs import finalize_quota
 from .models import Attempt, AuthFlow, AuthSession, ImageObject, Job, MetadataMutation, Project, UploadReservation, User, utcnow
@@ -282,7 +283,7 @@ def _old(entry, cutoff):
         return False  # Missing timestamps must never trigger deletion.
 
 
-def _cleanup_local(settings, now, protected_mutations=()):
+def _cleanup_local(settings, now, protected_mutations=(), protected_uploads=()):
     """Called under database locks; cache writes have their own shared lock."""
     cutoff = (now - ORPHAN_GRACE).replace(tzinfo=timezone.utc).timestamp()
     removed = 0
@@ -313,6 +314,18 @@ def _cleanup_local(settings, now, protected_mutations=()):
             if latest < cutoff:
                 shutil.rmtree(path)
                 removed += 1
+    upload_dir = settings.data_dir / "uploads"
+    if upload_dir.exists():
+        for path in upload_dir.glob("*.lock"):
+            if path.stem in protected_uploads or path.stat().st_mtime >= cutoff:
+                continue
+            try:
+                with upload_lock(settings, path.stem, blocking=False) as data:
+                    # Committed uploads can leave a part after a process crash.
+                    data.unlink(missing_ok=True)
+                    path.unlink(missing_ok=True)
+            except (BlockingIOError, ValueError):
+                continue
     return removed
 
 
@@ -336,6 +349,12 @@ def reconcile(settings, db, objects, now=None):
         protected = {item["key"] for _, value in retained for item in value["objects"]}
         protected_projects = {item["id"] for _, value in retained for item in value["projects"]}
         for reservation in session.scalars(select(UploadReservation).where(UploadReservation.expires_at <= now).with_for_update()):
+            if reservation.file_name:
+                try:
+                    with upload_lock(settings, reservation.id, blocking=False) as path:
+                        path.unlink(missing_ok=True)
+                except BlockingIOError:
+                    continue
             user = session.get(User, reservation.user_id)
             if user:
                 user.reserved_bytes = max(0, user.reserved_bytes - reservation.bytes)
@@ -412,7 +431,8 @@ def reconcile(settings, db, objects, now=None):
             session.execute(delete(ImageObject).where(ImageObject.project_id == project.id))
             session.delete(project)
             result["deleted_project_records"] += 1
-        result["local_artifacts"] = _cleanup_local(settings, now, set(session.scalars(select(MetadataMutation.id))))
+        result["local_artifacts"] = _cleanup_local(settings, now, set(session.scalars(select(MetadataMutation.id))),
+            set(session.scalars(select(UploadReservation.id))))
     return result
 
 

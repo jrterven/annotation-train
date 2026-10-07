@@ -32,6 +32,22 @@ The maintenance container runs the coordinated backup and reconciliation CLI.
 All four application processes use the same PostgreSQL metadata and the same
 project volume. PostgreSQL and `pg_dump` use major version 15 together.
 
+## Large source images
+
+Project originals have no fixed byte or megapixel ceiling. The account/global
+storage quotas still apply. Files over 8 MiB travel in authenticated 8 MiB chunks
+so the reverse proxy never needs to accept a full image in one request. Uploads
+reserve their entire size before transfer, verify offsets and replayed chunks,
+and validate the complete decoded image before committing it to private R2.
+Interrupted reservations expire after one hour of inactivity; maintenance clears
+their temporary files. No bucket CORS or browser storage credentials are needed.
+
+Annotations and COCO always use original dimensions. The editor uses a display
+derivative up to 8192 pixels per side, independently of the original in R2 and
+SAM 3 input. Available memory, the 120-second GPU deadline and annotation output
+budgets still apply; removing an image ceiling does not create unlimited RAM.
+The separate visual-example prompt keeps its existing input budget.
+
 ## GPU workers
 
 The reproducible ARM64 GB10 image is `Dockerfile.worker`, based on NVIDIA

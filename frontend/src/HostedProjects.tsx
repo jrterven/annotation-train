@@ -251,21 +251,70 @@ export function HostedUploads({
         setProgress(
           `Uploading ${completed + failures.length + 1} of ${images.length}: ${file.name}`,
         );
-        if (file.size > 20 * 1024 * 1024) {
-          failures.push(`${file.name}: exceeds 20 MB`);
-          continue;
-        }
-        const body = new FormData();
-        body.append("file", file);
         const relativePath = file.webkitRelativePath || file.name;
-        body.append(
-          "relative_path",
+        const name =
           folder && relativePath.includes("/")
             ? relativePath.slice(relativePath.indexOf("/") + 1)
-            : relativePath,
-        );
+            : relativePath;
         try {
-          await api(base + "/images", "POST", body);
+          if (file.size <= 8 * 1024 * 1024) {
+            const body = new FormData();
+            body.append("file", file);
+            body.append("relative_path", name);
+            await api(base + "/images", "POST", body);
+          } else {
+            const upload = await api<{ id: string; chunk_bytes: number }>(
+              base + "/uploads",
+              "POST",
+              {
+                file_name: name,
+                size: file.size,
+              },
+            );
+            const endpoint = `${base}/uploads/${upload.id}`;
+            try {
+              let offset = 0;
+              while (offset < file.size) {
+                if (cancelled.current) throw new Error("Upload cancelled");
+                const chunk = file.slice(offset, offset + upload.chunk_bytes);
+                let retries = 0;
+                for (;;) {
+                  try {
+                    const result = await api<{ offset: number }>(
+                      `${endpoint}?offset=${offset}`,
+                      "PUT",
+                      chunk,
+                    );
+                    if (result.offset <= offset || result.offset > file.size)
+                      throw new Error("Invalid upload progress");
+                    offset = result.offset;
+                    break;
+                  } catch (error) {
+                    // The same offset can be replayed safely after a lost response.
+                    if (
+                      cancelled.current ||
+                      retries++ >= 2 ||
+                      (error instanceof ApiError && error.status < 500)
+                    )
+                      throw error;
+                  }
+                }
+                setProgress(
+                  `Uploading ${file.name}: ${Math.round((100 * offset) / file.size)}%`,
+                );
+              }
+              if (cancelled.current) throw new Error("Upload cancelled");
+              setProgress(`Validating ${file.name}…`);
+              await api(endpoint + "/complete", "POST");
+            } catch (error) {
+              try {
+                await api(endpoint, "DELETE");
+              } catch {
+                /* Expiry also releases abandoned uploads. */
+              }
+              throw error;
+            }
+          }
           completed++;
         } catch (e) {
           failures.push(`${file.name}: ${errorText(e)}`);
@@ -327,7 +376,8 @@ export function HostedUploads({
           <div>
             <h2>Add images to {project.name}</h2>
             <p className="field-note">
-              Up to 20 MB and 16 megapixels per image.
+              Original resolution is preserved. Uploads use your account storage
+              quota.
             </p>
           </div>
           <button

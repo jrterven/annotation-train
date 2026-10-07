@@ -267,3 +267,46 @@ it("does not invent an image count when the project list provides only summaries
   ).toBeTruthy();
   expect(screen.queryByText("0 images")).toBeNull();
 });
+
+it("transfers files over 20 MB in chunks and keeps their original filename", async () => {
+  const chunkBytes = 8 * 1024 * 1024;
+  const file = new File([new Uint8Array(21 * 1024 * 1024)], "survey.tif", {
+    type: "image/tiff",
+  });
+  request.mockImplementation(async (path, method, body) => {
+    if (path.endsWith("/uploads"))
+      return { id: "upload-one", chunk_bytes: chunkBytes };
+    if (method === "PUT") {
+      const offset = Number(path.split("offset=")[1]);
+      expect(body).toBeInstanceOf(Blob);
+      expect((body as Blob).size).toBeLessThanOrEqual(chunkBytes);
+      return { offset: offset + (body as Blob).size };
+    }
+    return project;
+  });
+  render(
+    <HostedUploads
+      project={{ ...project, directory: "", image_root: "" }}
+      onClose={() => {}}
+      onUpdate={() => {}}
+    />,
+  );
+  fireEvent.change(screen.getByLabelText("Image files"), {
+    target: { files: [file] },
+  });
+  await waitFor(() =>
+    expect(screen.getByText("1 image uploaded.")).toBeTruthy(),
+  );
+  expect(request).toHaveBeenCalledWith(
+    "/projects/private-one/uploads",
+    "POST",
+    { file_name: "survey.tif", size: file.size },
+  );
+  expect(
+    request.mock.calls.filter(([, method]) => method === "PUT"),
+  ).toHaveLength(3);
+  expect(request).toHaveBeenCalledWith(
+    "/projects/private-one/uploads/upload-one/complete",
+    "POST",
+  );
+});

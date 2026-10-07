@@ -51,7 +51,8 @@ async function request<T>(
   headers: Record<string, string> = {},
 ): Promise<{ data: T; status: number }> {
   const isForm = body instanceof FormData;
-  if (body !== undefined && !isForm)
+  const isBlob = body instanceof Blob;
+  if (body !== undefined && !isForm && !isBlob)
     headers["Content-Type"] = "application/json";
   if (hosted && !["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken)
     headers["X-CSRF-Token"] = csrfToken;
@@ -60,7 +61,12 @@ async function request<T>(
     headers,
     credentials: "same-origin",
     ...(hosted ? { cache: "no-store" as const } : {}),
-    body: body === undefined ? undefined : isForm ? body : JSON.stringify(body),
+    body:
+      body === undefined
+        ? undefined
+        : isForm || isBlob
+          ? body
+          : JSON.stringify(body),
     signal,
   });
   if (!res.ok) {

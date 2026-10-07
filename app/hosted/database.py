@@ -31,6 +31,7 @@ class Database:
             additions = {
                 "projects": {"metadata_bytes": "BIGINT NOT NULL DEFAULT 0", "quota_version": "INTEGER NOT NULL DEFAULT 0",
                              "pending_mutation_id": "VARCHAR(36)"},
+                "upload_reservations": {"file_name": "VARCHAR(1024)"},
                 "image_objects": {"thumbnail_bytes": "BIGINT NOT NULL DEFAULT 0"},
             }
             for table, columns in additions.items():

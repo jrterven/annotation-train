@@ -49,16 +49,22 @@ class HostedMiddleware:
             csrf = headers.get(b"x-csrf-token", b"").decode()
             if not secrets.compare_digest(csrf, state["csrf_token"]):
                 return await JSONResponse({"detail": "Invalid CSRF token"}, status_code=403)(scope, receive, send)
-        maximum = self.settings.max_upload_bytes + 64 * 1024
+        upload = re.fullmatch(r"/api/v1/projects/([a-f0-9-]{36})/images/?", path)
+        legacy_upload = upload and scope["method"] == "POST"
+        maximum = self.settings.storage_limit_bytes + 64 * 1024 if legacy_upload else self.settings.max_request_bytes
+        if scope["method"] == "PUT" and re.fullmatch(r"/api/v1/projects/[a-f0-9-]{36}/uploads/[a-f0-9-]{36}", path):
+            from .uploads import CHUNK_BYTES
+            maximum = CHUNK_BYTES
         length_header = headers.get(b"content-length")
         try:
             declared = int(length_header) if length_header else maximum
             if declared < 0 or declared > maximum:
                 raise BodyTooLarge()
-            upload = re.fullmatch(r"/api/v1/projects/([a-f0-9-]{36})/images/?", path)
-            if upload and scope["method"] == "POST":
+            if legacy_upload:
+                if length_header is None:
+                    raise HTTPException(411, "Content-Length is required; use chunked image uploads")
                 state["reservation_id"] = await run_in_threadpool(reserve_upload, self.db, self.settings,
-                    state["user_id"], upload[1], min(declared, self.settings.max_upload_bytes))
+                    state["user_id"], upload[1], declared)
         except BodyTooLarge:
             return await JSONResponse({"detail": "Request exceeds upload limit"}, status_code=413)(scope, receive, send)
         except HTTPException as exc:

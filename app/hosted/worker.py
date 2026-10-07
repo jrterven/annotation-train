@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from .job_protocol import AttemptRequest, MAX_REQUEST_BYTES, ResultTooLarge, execute_inference
+from .job_protocol import AttemptRequest, ResultTooLarge, execute_inference
 
 
 def _model_process(connection, expected_parent=None):
@@ -319,29 +319,6 @@ class PrivateWorkerMiddleware:
         expected = f"Bearer {self.token}".encode()
         if not hmac.compare_digest(headers.get(b"authorization", b""), expected):
             return await JSONResponse({"detail": "Unauthorized."}, 401)(scope, receive, send)
-        if scope["method"] == "POST":
-            chunks, length = [], 0
-            while True:
-                message = await receive()
-                if message["type"] == "http.disconnect":
-                    return
-                chunk = message.get("body", b"")
-                length += len(chunk)
-                if length > MAX_REQUEST_BYTES:
-                    return await JSONResponse({"detail": "Request too large."}, 413)(scope, receive, send)
-                chunks.append(chunk)
-                if not message.get("more_body", False):
-                    break
-            body, replayed = b"".join(chunks), False
-
-            async def replay():
-                nonlocal replayed
-                if not replayed:
-                    replayed = True
-                    return {"type": "http.request", "body": body, "more_body": False}
-                return await receive()
-
-            return await self.app(scope, replay, send)
         return await self.app(scope, receive, send)
 
 

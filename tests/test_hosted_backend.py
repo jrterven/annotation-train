@@ -365,3 +365,68 @@ def test_job_status_returns_missing_when_retention_removes_project_between_reads
 
     monkeypatch.setattr(Session, "get", project_disappears)
     assert client.get(f"/api/v1/jobs/{job['id']}").status_code == 404
+
+
+def test_large_chunked_image_keeps_original_and_quota(hosted):
+    """Both old limits are exceeded; transfer chunks never exceed the proxy cap."""
+    settings, db, objects, app, clients = hosted
+    client = clients['alice']
+    pid = client.post('/api/v1/projects', json={'name': 'Large original'}).json()['id']
+    root = f'/api/v1/projects/{pid}'
+    output = io.BytesIO()
+    Image.new('RGB', (4097, 4096), 'red').save(output, format='BMP')
+    data = output.getvalue()
+    assert len(data) > 20 * 1024 * 1024
+    response = client.post(root + '/uploads', json={'file_name': 'survey/large.bmp', 'size': len(data)})
+    assert response.status_code == 201, response.text
+    upload = response.json()
+    endpoint = root + '/uploads/' + upload['id']
+    with db.session() as session:
+        assert session.get(User, 'alice').reserved_bytes == len(data)
+    assert clients['bob'].put(endpoint + '?offset=0', content=b'x').status_code == 404
+    assert client.post(endpoint + '/complete').status_code == 409
+    assert client.put(endpoint + '?offset=1', content=b'x').status_code == 409
+    for offset in range(0, len(data), upload['chunk_bytes']):
+        chunk = data[offset:offset + upload['chunk_bytes']]
+        response = client.put(endpoint + f'?offset={offset}', content=chunk)
+        assert response.status_code == 200, response.text
+        assert response.json()['offset'] == offset + len(chunk)
+        if offset == 0:
+            assert client.put(endpoint + '?offset=0', content=chunk).json() == response.json()
+            assert client.put(endpoint + '?offset=0', content=b'wrong').status_code == 409
+    response = client.post(endpoint + '/complete')
+    assert response.status_code == 201, response.text
+    assert response.json()['images'][0]['width'] == 4097
+    assert response.json()['images'][0]['height'] == 4096
+    assert client.post(endpoint + '/complete').json() == response.json()
+    assert client.post(root + '/coco/export').status_code == 200
+    coco = client.get(root + '/coco/download').json()
+    assert coco['images'][0]['width'] == 4097
+    assert coco['images'][0]['file_name'] == 'survey/large.bmp'
+    with db.session() as session:
+        row = session.get(ImageObject, upload['id'])
+        assert objects.get(row.object_key) == data
+        assert session.get(User, 'alice').reserved_bytes == 0
+        assert session.get(ResourceCounter, 'global').reserved_bytes == 0
+    assert not (settings.data_dir / 'uploads' / (upload['id'] + '.part')).exists()
+
+
+def test_chunked_upload_enforces_reserved_bytes_and_releases_cancellation(hosted):
+    settings, db, objects, app, clients = hosted
+    client = clients['alice']
+    pid = client.post('/api/v1/projects', json={'name': 'Interrupted'}).json()['id']
+    root = f'/api/v1/projects/{pid}/uploads'
+    assert client.post(root, json={'file_name': '../private.png', 'size': 50}).status_code == 422
+    assert client.post(root, json={'file_name': 'a.png', 'size': settings.storage_limit_bytes}).status_code == 413
+    uid = client.post(root, json={'file_name': 'a.png', 'size': 5}).json()['id']
+    endpoint = root + '/' + uid
+    assert client.put(endpoint + '?offset=0', content=b'123456').status_code == 409
+    assert client.put(endpoint + '?offset=0', content=b'123').status_code == 200
+    assert client.put(endpoint + '?offset=3', content=b'45').status_code == 200
+    assert client.post(endpoint + '/complete').status_code == 422
+    assert clients['bob'].delete(endpoint).status_code == 404
+    assert client.delete(endpoint).status_code == 200
+    assert client.put(endpoint + '?offset=0', content=b'123').status_code == 404
+    with db.session() as session:
+        assert session.get(User, 'alice').reserved_bytes == 0
+    assert not (settings.data_dir / 'uploads' / (uid + '.part')).exists()
