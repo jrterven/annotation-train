@@ -15,11 +15,25 @@ export type SourceImage = {
   annotation_count: number;
 };
 export type Project = {
+  id?: string;
   name: string;
   directory: string;
   image_root: string;
   categories: Category[];
   images: SourceImage[];
+};
+export type HostedProject = Omit<Project, "directory" | "image_root"> & {
+  id: string;
+};
+export type HostedSession = {
+  user: { id: string; email: string; name: string } | null;
+  csrf_token: string | null;
+  usage: {
+    storage_bytes: number;
+    storage_limit_bytes: number;
+    inferences_used: number;
+    inference_limit: number;
+  } | null;
 };
 export type Annotation = {
   id: string;
@@ -63,4 +77,5 @@ export type GeometryResult = {
   preview: string;
 };
 export type ModelStatus = { state: string; device?: string; message?: string };
-export type Tool = "select" | "pan" | "positive" | "negative" | "box" | "polygon";
+export type Tool =
+  "select" | "pan" | "positive" | "negative" | "box" | "polygon";

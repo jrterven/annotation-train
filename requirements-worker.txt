@@ -1,0 +1,14 @@
+# Install CUDA-compatible torch/torchvision first using the host's verified
+# vendor wheels or container. This file never replaces the CUDA runtime.
+# ARM64 and x86-64 must pass the real startup probes before serving jobs.
+fastapi==0.142.2
+uvicorn==0.54.0
+numpy==2.5.3
+Pillow==12.3.0
+shapely==2.1.2
+pycocotools==2.0.11
+transformers==5.18.0
+huggingface_hub==1.33.0
+psutil==7.2.2
+sentencepiece==0.2.1
+sacremoses==0.1.1

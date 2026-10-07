@@ -38,13 +38,22 @@ import {
   Pentagon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { api, assetURL, errorText, uid } from "./api";
+import {
+  api,
+  assetURL,
+  errorText,
+  jobChangedEvent,
+  selectProject,
+  uid,
+} from "./api";
+import type { JobProgress } from "./api";
 import type {
   Annotation,
   Category,
   Component,
   Draft,
   GeometryResult,
+  HostedSession,
   ImageState,
   ModelStatus,
   Part,
@@ -57,6 +66,7 @@ import { useWorkspace } from "./persistence";
 import CanvasEditor from "./CanvasEditor";
 import type { Vertex } from "./CanvasEditor";
 import { FileBrowser, ProjectDialog } from "./ProjectDialog";
+import { HostedProjects, HostedUploads } from "./HostedProjects";
 import VisualReference from "./VisualReference";
 import type { VisualExample } from "./VisualReference";
 const PALETTE = [
@@ -120,10 +130,20 @@ type Pending = {
   imageId: number;
   kind: string;
 };
-export default function App() {
+export default function App({
+  hostedSession,
+  onLogout,
+}: {
+  hostedSession?: HostedSession;
+  onLogout?: () => Promise<void>;
+} = {}) {
+  const hosted = !!hostedSession;
   const [project, setProject] = useState<Project | null>(null);
   const [imageId, setImageId] = useState<number | null>(null);
-  const [projectDialog, setProjectDialog] = useState(false);
+  const [projectDialog, setProjectDialog] = useState(hosted);
+  const [uploadDialog, setUploadDialog] = useState(false);
+  const [jobs, setJobs] = useState<Map<string, JobProgress>>(new Map());
+  const [loggingOut, setLoggingOut] = useState(false);
   const [relink, setRelink] = useState(false);
   const [booting, setBooting] = useState(true);
   const [loadingImage, setLoadingImage] = useState(false);
@@ -215,6 +235,7 @@ export default function App() {
     abortAll();
     workspace.reset();
     sessionToken.current++;
+    selectProject(result);
     setProject(result);
     setImageId(result.images[0]?.id ?? null);
     setCategoryId(result.categories[0]?.id ?? 0);
@@ -230,6 +251,32 @@ export default function App() {
     setVisualDialogOpen(false);
     setProjectDialog(false);
   }
+  useEffect(() => {
+    if (!hosted) return;
+    const change = (event: Event) => {
+      const job = (event as CustomEvent<JobProgress>).detail;
+      if (job.status === "cancel_unconfirmed")
+        setToast(
+          "Cancellation could not be confirmed. The request may still finish and count toward your daily limit.",
+        );
+      setJobs((old) => {
+        const next = new Map(old);
+        if (["finished", "cancel_unconfirmed"].includes(job.status))
+          next.delete(job.id);
+        else next.set(job.id, job);
+        return next;
+      });
+    };
+    window.addEventListener(jobChangedEvent, change);
+    return () => window.removeEventListener(jobChangedEvent, change);
+  }, [hosted]);
+  useEffect(
+    () => () => {
+      for (const request of pending.current.values())
+        request.controller.abort();
+    },
+    [],
+  );
   useEffect(() => {
     let active = true;
     void api<Project | null>("/project")
@@ -259,7 +306,9 @@ export default function App() {
           if (active)
             setModel({
               state: "error",
-              message: "Could not connect to the local server.",
+              message: hosted
+                ? "Could not connect to the server. Manual annotation is still available."
+                : "Could not connect to the local server.",
             });
         });
     check();
@@ -288,7 +337,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [imageId, project?.directory, sessionToken.current]);
+  }, [imageId, project?.id, project?.directory, sessionToken.current]);
   useEffect(() => {
     if (!toast) return;
     const timeout = setTimeout(() => setToast(null), 6500);
@@ -494,10 +543,72 @@ export default function App() {
       !state?.draft ||
       !activePart?.polygon?.closed ||
       pointBusy ||
-      confirming
+      confirming ||
+      geometryBusy ||
+      (hosted && !["ready", "loaded"].includes(model.state))
     )
       return;
     void inferPart(imageId, state.draft.id, activePart);
+  }
+  async function usePolygon() {
+    if (
+      imageId === null ||
+      !state?.draft ||
+      !activePart?.polygon?.closed ||
+      pointBusy ||
+      geometryBusy ||
+      confirming
+    )
+      return;
+    const id = imageId,
+      draftId = state.draft.id,
+      part = activePart;
+    const captured = signature(part),
+      session = sessionToken.current,
+      token = uid();
+    geometryToken.current = token;
+    setGeometryBusy(true);
+    try {
+      const result = await api<GeometryResult>("/geometry", "POST", {
+        image_id: id,
+        components: [{ outer: part.polygon!.vertices, holes: [] }],
+      });
+      const fresh = workspace.get(id);
+      const freshPart = fresh?.draft?.parts.find(
+        (candidate) => candidate.id === part.id,
+      );
+      if (
+        geometryToken.current !== token ||
+        sessionToken.current !== session ||
+        fresh?.draft?.id !== draftId ||
+        !freshPart ||
+        signature(freshPart) !== captured
+      )
+        return;
+      workspace.update(id, (current) => ({
+        ...current,
+        draft: current.draft
+          ? {
+              ...current.draft,
+              parts: current.draft.parts.map((candidate) =>
+                candidate.id === part.id
+                  ? {
+                      ...candidate,
+                      ...result,
+                      seed_mask: result.mask,
+                    }
+                  : candidate,
+              ),
+            }
+          : null,
+      }));
+      if (activeImage.current === id && fresh.draft.active_part_id === part.id)
+        setTool("select");
+    } catch (error) {
+      if (geometryToken.current === token) setToast(errorText(error));
+    } finally {
+      if (geometryToken.current === token) setGeometryBusy(false);
+    }
   }
   function resumeDraft() {
     if (!categoryRequired()) return;
@@ -520,7 +631,9 @@ export default function App() {
     const original = draft.parts[index];
     if (original.polygon && !original.seed_mask) {
       setToast(
-        "Close the polygon and click Refine with SAM before adding corrections.",
+        hosted
+          ? "Close the polygon, then choose Use polygon or Refine with SAM before adding corrections."
+          : "Close the polygon and click Refine with SAM before adding corrections.",
       );
       return;
     }
@@ -595,12 +708,16 @@ export default function App() {
     setTool("select");
   }
   async function confirmDraft() {
-    if (imageId === null || !state?.draft || confirming) return;
+    if (imageId === null || !state?.draft || confirming || geometryBusy) return;
     if (
       !pointBusy &&
       state.draft.parts.some((part) => part.polygon && !part.mask)
     ) {
-      setToast("Refine the polygon with SAM before confirming.");
+      setToast(
+        hosted
+          ? "Choose Use polygon or refine with SAM before confirming."
+          : "Refine the polygon with SAM before confirming.",
+      );
       return;
     }
     if (pointBusy || state.draft.parts.some((p) => !p.mask)) {
@@ -934,9 +1051,19 @@ export default function App() {
     }
     try {
       await workspace.flush();
-      const result = await api<{ path: string }>("/coco/export", "POST", {});
-      setExportPath(result.path);
-      setToast("COCO saved to the project directory.");
+      const result = await api<{ path?: string; file_name?: string }>(
+        "/coco/export",
+        "POST",
+        {},
+      );
+      setExportPath(result.path || result.file_name || "annotations.json");
+      if (hosted) {
+        const link = document.createElement("a");
+        link.href = assetURL("/coco/download");
+        link.download = result.file_name || "annotations.json";
+        link.click();
+        setToast("COCO export ready to download.");
+      } else setToast("COCO saved to the project directory.");
     } catch (e) {
       setToast(errorText(e));
     }
@@ -948,9 +1075,40 @@ export default function App() {
     }
     try {
       await workspace.flush();
+      if (hosted) abortAll();
       setProjectDialog(true);
     } catch (e) {
       setToast(errorText(e));
+    }
+  }
+  async function showUploads() {
+    if (geometryBusy || confirming) {
+      setToast("Wait for the mask update to finish.");
+      return;
+    }
+    try {
+      await workspace.flush();
+      abortAll();
+      setUploadDialog(true);
+    } catch (e) {
+      setToast(errorText(e));
+    }
+  }
+  async function logout() {
+    if (!onLogout || loggingOut) return;
+    if (geometryBusy || confirming) {
+      setToast("Wait for the mask update to finish.");
+      return;
+    }
+    setLoggingOut(true);
+    try {
+      await workspace.flush();
+      abortAll();
+      await onLogout();
+    } catch (e) {
+      setToast(errorText(e));
+    } finally {
+      setLoggingOut(false);
     }
   }
   function editCategory(category: Category | "new") {
@@ -1022,6 +1180,7 @@ export default function App() {
         categoryDialog ||
         relink ||
         conflictDialog ||
+        uploadDialog ||
         visualDialogOpen
       )
         return;
@@ -1081,6 +1240,7 @@ export default function App() {
     !!state?.draft &&
     state.draft.parts.every((p) => p.mask) &&
     !pointBusy &&
+    !geometryBusy &&
     !confirming;
   return (
     <div className="application" data-work-version={workVersion}>
@@ -1111,11 +1271,59 @@ export default function App() {
           <span className="header-tagline">Image annotation</span>
         )}
         <div className="header-actions">
+          {hosted && (
+            <details className="hosted-account">
+              <summary>
+                {hostedSession.user?.name || hostedSession.user?.email}
+              </summary>
+              <div className="hosted-account-menu">
+                <strong>{hostedSession.user?.email}</strong>
+                {hostedSession.usage && (
+                  <>
+                    <p>
+                      {(hostedSession.usage.storage_bytes / 1000000).toFixed(1)}{" "}
+                      /{" "}
+                      {(
+                        hostedSession.usage.storage_limit_bytes / 1000000
+                      ).toFixed(0)}{" "}
+                      MB stored
+                    </p>
+                    <progress
+                      value={hostedSession.usage.storage_bytes}
+                      max={hostedSession.usage.storage_limit_bytes}
+                      aria-label="Storage used"
+                    />
+                    <small>Images, thumbnails, and annotation data.</small>
+                    <p>
+                      {hostedSession.usage.inferences_used} /{" "}
+                      {hostedSession.usage.inference_limit} SAM 3 requests today
+                    </p>
+                    <small>Daily limit resets at midnight UTC.</small>
+                  </>
+                )}
+                <button
+                  className="button secondary full"
+                  disabled={loggingOut}
+                  onClick={() => void logout()}
+                >
+                  Sign out
+                </button>
+                <nav>
+                  <a href="/privacy" target="_blank" rel="noopener noreferrer">
+                    Privacy
+                  </a>
+                  <a href="/terms" target="_blank" rel="noopener noreferrer">
+                    Terms
+                  </a>
+                </nav>
+              </div>
+            </details>
+          )}
           <button
             className={`model-status ${modelReady ? "ready" : ""}`}
             title={model.message || "Load SAM 3"}
             onClick={() => void ensureLoad()}
-            disabled={modelLoading || model.state === "loading"}
+            disabled={hosted || modelLoading || model.state === "loading"}
           >
             {modelLoading || model.state === "loading" ? (
               <LoaderCircle size={12} className="spin" />
@@ -1175,7 +1383,8 @@ export default function App() {
               ) : (
                 <FolderOpen size={18} />
               )}{" "}
-              Open project <ArrowUpRight size={17} />
+              {hosted ? "Your projects" : "Open project"}{" "}
+              <ArrowUpRight size={17} />
             </button>
           </div>
         </main>
@@ -1187,9 +1396,15 @@ export default function App() {
                 <span>Images</span>
                 <span className="count-pill">{project.images.length}</span>
                 <IconButton
-                  icon={Link2}
-                  title="Relink image directory"
-                  onClick={() => setRelink(true)}
+                  icon={hosted ? ImagePlus : Link2}
+                  title={
+                    hosted
+                      ? "Upload images or import COCO"
+                      : "Relink image directory"
+                  }
+                  onClick={() =>
+                    hosted ? void showUploads() : setRelink(true)
+                  }
                 />
               </div>
               <div className="image-search">
@@ -1245,7 +1460,9 @@ export default function App() {
                   <div className="empty-panel">
                     {project.images.length
                       ? "No matches"
-                      : "No images in this directory."}
+                      : hosted
+                        ? "Upload images to begin."
+                        : "No images in this directory."}
                   </div>
                 )}
               </div>
@@ -1391,7 +1608,11 @@ export default function App() {
                     <select
                       className="prompt-language"
                       aria-label="Prompt language"
-                      title="Spanish prompts are translated to English locally"
+                      title={
+                        hosted
+                          ? "Spanish prompts are translated to English on the GPU server"
+                          : "Spanish prompts are translated to English locally"
+                      }
                       value={promptLanguage}
                       onChange={(e) =>
                         setPromptLanguage(e.target.value as "en" | "es")
@@ -1412,7 +1633,7 @@ export default function App() {
                     />
                     <VisualReference
                       value={visualExample}
-                      scope={`${project.directory}:${sessionToken.current}:${imageId}`}
+                      scope={`${project.id || project.directory}:${sessionToken.current}:${imageId}`}
                       onChange={changeVisualExample}
                       onPickStart={cancelProposalSearches}
                       onOpenChange={setVisualDialogOpen}
@@ -1477,6 +1698,14 @@ export default function App() {
                       <>
                         <ImagePlus size={38} strokeWidth={1} />
                         <span>No images</span>
+                        {hosted && (
+                          <button
+                            className="button primary"
+                            onClick={() => void showUploads()}
+                          >
+                            <ImagePlus size={16} /> Upload images
+                          </button>
+                        )}
                       </>
                     )}
                   </div>
@@ -1503,18 +1732,45 @@ export default function App() {
                         Close polygon <kbd>↵</kbd>
                       </button>
                     ) : activePolygon && !activePart?.mask ? (
-                      <button
-                        className="button primary compact"
-                        disabled={pointBusy || confirming}
-                        onClick={refinePolygon}
-                      >
-                        {pointBusy ? (
-                          <LoaderCircle className="spin" size={14} />
-                        ) : (
-                          <ScanLine size={14} />
+                      <>
+                        {hosted && (
+                          <button
+                            className="button primary compact"
+                            disabled={pointBusy || geometryBusy || confirming}
+                            onClick={() => void usePolygon()}
+                            title="Use the drawn polygon without SAM 3"
+                          >
+                            {geometryBusy ? (
+                              <LoaderCircle className="spin" size={14} />
+                            ) : (
+                              <Pentagon size={14} />
+                            )}
+                            Use polygon
+                          </button>
                         )}
-                        Refine with SAM
-                      </button>
+                        <button
+                          className={`button ${hosted ? "secondary" : "primary"} compact`}
+                          disabled={
+                            pointBusy ||
+                            confirming ||
+                            geometryBusy ||
+                            (hosted && !modelReady)
+                          }
+                          title={
+                            hosted && !modelReady
+                              ? "SAM 3 is unavailable. Use polygon for manual annotation."
+                              : undefined
+                          }
+                          onClick={refinePolygon}
+                        >
+                          {pointBusy ? (
+                            <LoaderCircle className="spin" size={14} />
+                          ) : (
+                            <ScanLine size={14} />
+                          )}
+                          Refine with SAM
+                        </button>
+                      </>
                     ) : null}
                     <button
                       className="button primary compact"
@@ -1989,12 +2245,28 @@ export default function App() {
                 </>
               ) : (
                 <>
-                  <Check size={13} /> Saved locally
+                  <Check size={13} /> {hosted ? "Saved" : "Saved locally"}
                 </>
               )}
             </div>
             <div className="status-middle">
-              {currentImage?.file_name || project.image_root}
+              {hosted && jobs.size ? (
+                <span className="hosted-job-status">
+                  <LoaderCircle size={12} className="spin" />
+                  {[...jobs.values()].some(
+                    (job) => job.status === "reconnecting",
+                  )
+                    ? "Reconnecting to inference…"
+                    : [...jobs.values()].some((job) =>
+                          ["running", "dispatched"].includes(job.status),
+                        )
+                      ? "SAM 3 is processing…"
+                      : "Waiting for a GPU…"}
+                  <button onClick={abortAll}>Cancel requests</button>
+                </span>
+              ) : (
+                currentImage?.file_name || project.image_root
+              )}
             </div>
             <div>
               {exportPath ? (
@@ -2026,13 +2298,38 @@ export default function App() {
           </button>
         </div>
       )}
-      {projectDialog && (
+      {projectDialog && !hosted && (
         <ProjectDialog
           onClose={() => setProjectDialog(false)}
           onOpen={openProject}
         />
       )}{" "}
-      {relink && project && (
+      {projectDialog && hosted && (
+        <HostedProjects
+          onClose={() => setProjectDialog(false)}
+          onOpen={openProject}
+          onDelete={(id) => {
+            if (project?.id === id) {
+              abortAll();
+              workspace.reset();
+              sessionToken.current++;
+              selectProject({});
+              setProject(null);
+              setImageId(null);
+            }
+          }}
+        />
+      )}
+      {uploadDialog && project && hosted && (
+        <HostedUploads
+          project={project}
+          onClose={() => setUploadDialog(false)}
+          onUpdate={(result) => {
+            openProject(result);
+          }}
+        />
+      )}
+      {relink && project && !hosted && (
         <FileBrowser
           kind="directory"
           initial={project.image_root}
@@ -2184,8 +2481,8 @@ export default function App() {
             </div>
             <p className="modal-description">
               Your changes are still in this window. Download a copy before
-              reloading from disk. Reloading replaces local changes to this
-              image.
+              reloading the saved version. Reloading replaces local changes to
+              this image.
             </p>
             <div className="conflict-actions">
               <button className="button secondary" onClick={downloadLocal}>
@@ -2204,7 +2501,8 @@ export default function App() {
                   }
                 }}
               >
-                <RotateCcw size={15} /> Reload from disk
+                <RotateCcw size={15} />{" "}
+                {hosted ? "Reload saved version" : "Reload from disk"}
               </button>
             </div>
           </section>

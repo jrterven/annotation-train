@@ -14,3 +14,10 @@ sample/
 .DS_Store
 .playwright-cli/
 *.tsbuildinfo
+.hosted-data/
+.hosted-cache/
+.private/
+*.pem
+*.key
+*credentials*.json
+*client_secret*.json

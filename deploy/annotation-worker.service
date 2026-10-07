@@ -1,0 +1,27 @@
+[Unit]
+Description=Private annotation GPU worker
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=annotation-worker
+Group=annotation-worker
+WorkingDirectory=/opt/annotation
+EnvironmentFile=/etc/annotation/worker.env
+ExecStart=/opt/annotation/.venv/bin/python -m app.hosted.worker
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=annotation-worker
+CacheDirectory=annotation-models
+ReadWritePaths=/var/lib/annotation-worker /var/cache/annotation-models
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

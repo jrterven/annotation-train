@@ -4,6 +4,15 @@ A local web application for image instance segmentation with **SAM 3**. Annotate
 
 Built with React, TypeScript, React Konva, FastAPI, PyTorch, and SQLite.
 
+## Hosted mode
+
+The separate hosted entry point adds Google sign-in, private browser-uploaded
+projects, Cloudflare R2 storage, PostgreSQL accounts and quotas, and a durable
+queue for remote SAM 3 workers. `run.py` still starts the original local app
+without Google, R2, or PostgreSQL. See [HOSTED.md](HOSTED.md) for configuration,
+deployment, backup/restore, and the release checks. Hosted mode does not add
+training or YOLO features.
+
 ## Screenshots
 
 The editor keeps image navigation, annotation tools, and instance controls around the canvas. Masks remain editable after SAM confirmation.
@@ -20,7 +29,7 @@ Small mask holes can be filled explicitly with an adjustable pixel-area threshol
 
 ## Install
 
-Requires **Python 3.12**, **Node.js 22.x (22.13 or later), 24.x, or 26+**, and npm. Target platforms are macOS Apple Silicon, Linux, and Windows through WSL. SAM 3 has been validated on an M4 Max using MPS and CPU; Linux/CUDA and WSL still require testing on those systems. See [VALIDATION.md](VALIDATION.md) for measured results and limitations.
+Requires **Python 3.12**, **Node.js 22.x (22.13 or later), 24.x, or 26+**, and npm. Target platforms are macOS Apple Silicon, Linux, and Windows through WSL. SAM 3 has been validated on an M4 Max using MPS and CPU, and the hosted worker on NVIDIA GB10 ARM64 Linux/CUDA. The x86-64 GPU installer and WSL still require physical testing. See [VALIDATION.md](VALIDATION.md) for measured results and limitations.
 
 ### 1. Install Python 3.12
 

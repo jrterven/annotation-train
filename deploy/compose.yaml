@@ -1,0 +1,79 @@
+name: annotation
+services:
+  postgres:
+    image: postgres:15-bookworm
+    restart: unless-stopped
+    env_file: ${ANNOTATION_POSTGRES_ENV_FILE:?Set an absolute private postgres environment file}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [database]
+
+  web:
+    image: annotation-hosted:${ANNOTATION_RELEASE:-local}
+    build:
+      context: ..
+      dockerfile: Dockerfile.hosted
+    restart: unless-stopped
+    env_file: ${ANNOTATION_PRIVATE_ENV_FILE:?Set an absolute private application environment file}
+    environment:
+      ANNOTATION_DATA_DIR: /var/lib/annotation
+      ANNOTATION_CACHE_DIR: /var/cache/annotation
+    volumes:
+      - project-data:/var/lib/annotation
+      - image-cache:/var/cache/annotation
+    ports: ["127.0.0.1:8765:8765"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [database, outbound]
+
+  dispatcher:
+    image: annotation-hosted:${ANNOTATION_RELEASE:-local}
+    command: ["python", "-m", "app.hosted.dispatcher"]
+    restart: unless-stopped
+    env_file: ${ANNOTATION_PRIVATE_ENV_FILE:?Set an absolute private application environment file}
+    environment:
+      ANNOTATION_DATA_DIR: /var/lib/annotation
+      ANNOTATION_CACHE_DIR: /var/cache/annotation
+    volumes:
+      - project-data:/var/lib/annotation
+      - image-cache:/var/cache/annotation
+    depends_on:
+      postgres: {condition: service_healthy}
+      web: {condition: service_started}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [database, outbound]
+
+  maintenance:
+    image: annotation-hosted:${ANNOTATION_RELEASE:-local}
+    command: ["python", "-m", "app.hosted.maintenance", "run"]
+    restart: unless-stopped
+    env_file: ${ANNOTATION_PRIVATE_ENV_FILE:?Set an absolute private application environment file}
+    environment:
+      ANNOTATION_DATA_DIR: /var/lib/annotation
+      ANNOTATION_CACHE_DIR: /var/cache/annotation
+    volumes:
+      - project-data:/var/lib/annotation
+      - image-cache:/var/cache/annotation
+    depends_on:
+      postgres: {condition: service_healthy}
+      web: {condition: service_started}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [database, outbound]
+
+volumes:
+  postgres-data:
+  project-data:
+  image-cache:
+networks:
+  database:
+    internal: true
+  outbound:

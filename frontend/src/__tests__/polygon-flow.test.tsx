@@ -136,6 +136,7 @@ let inference: (body: {
   part: Part;
 }) => Promise<GeometryResult & { image_id: number; revision: number }>;
 let lastPrediction: GeometryResult;
+let modelState: string;
 let textInference: (body: {
   image_id: number;
   revision: number;
@@ -170,6 +171,26 @@ async function boot() {
   await screen.findByTestId("canvas");
   return view;
 }
+async function bootHosted() {
+  modelState = "unavailable";
+  const view = render(
+    <App
+      hostedSession={{
+        user: { id: "owner", name: "Owner", email: "owner@example.test" },
+        csrf_token: "csrf",
+        usage: null,
+      }}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Open Polygon experiment" }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Your projects" })).toBeNull(),
+  );
+  await screen.findByTestId("canvas");
+  return view;
+}
 function polygon(points = vertices, closed = false) {
   act(() => current().onPolygon(structuredClone(points), closed));
 }
@@ -201,6 +222,7 @@ beforeEach(() => {
     [2, blank(2)],
   ]);
   lastPrediction = prediction;
+  modelState = "ready";
   textInference = async (body) => ({
     image_id: body.image_id,
     revision: body.revision,
@@ -232,7 +254,12 @@ beforeEach(() => {
     body?: unknown,
   ) => {
     if (path === "/project") return structuredClone(project);
-    if (path === "/health") return { model: { state: "ready", device: "mps" } };
+    if (path === "/health")
+      return { model: { state: modelState, device: "mps" } };
+    if (path === "/projects")
+      return { projects: [{ id: "hosted-project", name: project.name }] };
+    if (path === "/projects/hosted-project")
+      return { ...structuredClone(project), id: "hosted-project" };
     const match = path.match(/^\/images\/(\d+)\/state$/);
     if (match) {
       const id = Number(match[1]);
@@ -520,9 +547,77 @@ describe("annotation toolbar", () => {
       screen.getByRole("textbox", { name: "Object to segment" }),
       { target: { value: "zanahorias" } },
     );
-    fireEvent.submit(screen.getByRole("form", { name: "Concept segmentation" }));
+    fireEvent.submit(
+      screen.getByRole("form", { name: "Concept segmentation" }),
+    );
     await screen.findByText(
       "No objects found for “carrots”. Try a different description.",
     );
+  });
+});
+
+describe("hosted manual polygons without a GPU", () => {
+  it("rasterizes, confirms, saves and reopens a polygon without any inference request", async () => {
+    const view = await bootHosted();
+    polygon(vertices, true);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Refine with SAM",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
+    await waitFor(() => expect(activePart()?.mask).toEqual(seed.mask));
+    expect(activePart()?.seed_mask).toEqual(seed.mask);
+    expect(calls("/geometry")[0][2]).toEqual({
+      image_id: 1,
+      components: [{ outer: vertices, holes: [] }],
+    });
+    lastPrediction = seed;
+    fireEvent.click(screen.getByRole("button", { name: /Confirm/ }));
+    await waitFor(() => expect(current().annotations).toHaveLength(1));
+    expect(current().annotations[0].mask).toEqual(seed.mask);
+    expect(current().draft).toBeNull();
+    expect(calls("/masks/union")[0][2]).toEqual({
+      image_id: 1,
+      masks: [seed.mask],
+    });
+    expect(
+      request.mock.calls.some(([path]) => path.startsWith("/infer/")),
+    ).toBe(false);
+    await save();
+    view.unmount();
+    await bootHosted();
+    expect(current().annotations[0].mask).toEqual(seed.mask);
+    expect(current().draft).toBeNull();
+  });
+
+  it("preserves an invalid polygon for correction and ignores a discarded CPU result", async () => {
+    await bootHosted();
+    polygon(vertices, true);
+    geometry = async () => {
+      throw new ApiError(422, "The polygon intersects itself.");
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
+    await screen.findByText("The polygon intersects itself.");
+    expect(activePart()?.polygon).toEqual({ vertices, closed: true });
+    expect(activePart()?.mask).toBeUndefined();
+    expect(
+      (screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    const pending = deferred<GeometryResult>();
+    geometry = () => pending.promise;
+    fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    await act(async () => {
+      pending.resolve(seed);
+    });
+    expect(current().draft).toBeNull();
+    expect(current().annotations).toHaveLength(0);
+    expect(
+      request.mock.calls.some(([path]) => path.startsWith("/infer/")),
+    ).toBe(false);
   });
 });

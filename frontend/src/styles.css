@@ -1773,3 +1773,279 @@ kbd {
     padding: 9px 6px;
   }
 }
+
+/* Hosted mode shares the editor and adds account and project flows. */
+.hosted-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+}
+.hosted-editor {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.hosted-editor > .application {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+.hosted-landing {
+  min-height: 100dvh;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(ellipse at 25% 20%, #e5eadc, transparent 55%), var(--paper);
+  padding: 40px 24px;
+}
+.hosted-landing-card {
+  max-width: 590px;
+  width: 100%;
+  text-align: left;
+}
+.hosted-landing-card h1 {
+  font:
+    700 clamp(36px, 6vw, 60px)/1.12 Manrope,
+    sans-serif;
+  letter-spacing: -2px;
+  margin: 20px 0;
+}
+.hosted-landing-card > p:not(.hosted-eyebrow):not(.field-note) {
+  color: var(--muted);
+  line-height: 1.7;
+  max-width: 470px;
+}
+.hosted-eyebrow {
+  margin-top: 28px;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+.hosted-landing-card .welcome-cta {
+  display: inline-flex;
+  margin: 14px 0;
+  text-decoration: none;
+}
+.hosted-landing-card footer,
+.public-document footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  font-size: 13px;
+  margin-top: 44px;
+}
+.hosted-landing-card footer a,
+.public-document a {
+  color: var(--green);
+}
+.public-document {
+  height: 100dvh;
+  overflow-y: auto;
+  padding: 48px max(24px, calc((100vw - 760px) / 2));
+  background: var(--paper);
+  line-height: 1.8;
+}
+.public-document .brand {
+  text-decoration: none;
+}
+.public-document h1 {
+  font-family: Manrope, sans-serif;
+  font-size: 36px;
+  margin: 40px 0 22px;
+}
+.public-document h2 {
+  font-size: 20px;
+  margin-top: 28px;
+}
+.public-document p {
+  color: var(--muted);
+}
+.hosted-projects,
+.hosted-upload {
+  width: min(570px, calc(100vw - 32px));
+}
+.hosted-new-project {
+  display: flex;
+  gap: 10px;
+  margin: 16px 0 24px;
+}
+.hosted-new-project input {
+  min-width: 0;
+  flex: 1;
+}
+.hosted-project-list {
+  max-height: 42vh;
+  overflow-y: auto;
+}
+.hosted-project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.hosted-project-open {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 12px;
+  padding: 17px 8px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  border: 0;
+}
+.hosted-project-open span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.hosted-project-open strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hosted-project-open small {
+  color: var(--muted);
+}
+.hosted-delete-confirm {
+  margin-top: 20px;
+  background: #fff4f4;
+  padding: 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.hosted-delete-confirm p {
+  margin-top: 0;
+}
+.button.danger {
+  background: #b52c49;
+  color: white;
+}
+.hosted-inline-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.hosted-import {
+  border-top: 1px solid var(--border);
+  margin-top: 24px;
+  padding-top: 16px;
+}
+.hosted-import h3 {
+  font-size: 14px;
+}
+.hosted-upload .inline-status {
+  margin-top: 20px;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+.upload-errors {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.hosted-account {
+  position: relative;
+  margin-right: 10px;
+}
+.hosted-account summary {
+  cursor: pointer;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+.hosted-account-menu {
+  position: absolute;
+  right: 0;
+  top: 30px;
+  z-index: 20;
+  width: 290px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px #312a4b22;
+  padding: 20px;
+  font-size: 12px;
+}
+.hosted-account-menu strong {
+  overflow-wrap: anywhere;
+}
+.hosted-account-menu p {
+  margin-bottom: 6px;
+}
+.hosted-account-menu progress {
+  width: 100%;
+  accent-color: var(--green);
+}
+.hosted-account-menu small {
+  color: var(--muted);
+}
+.hosted-account-menu .button {
+  margin: 18px 0 12px;
+}
+.hosted-account-menu nav {
+  display: flex;
+  gap: 16px;
+}
+.hosted-account-menu a {
+  color: var(--green);
+}
+.session-banner {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  background: #fff5d8;
+  padding: 10px 22px;
+  font-size: 13px;
+  z-index: 120;
+}
+.session-banner span {
+  flex: 1;
+}
+.session-banner a,
+.session-banner button {
+  color: #78531a;
+  font-weight: 600;
+}
+.session-banner button {
+  border: 0;
+  background: transparent;
+  text-decoration: underline;
+}
+.hosted-job-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.hosted-job-status button {
+  background: transparent;
+  border: 0;
+  color: var(--green);
+  text-decoration: underline;
+  font-size: 11px;
+}
+@media (max-width: 760px) {
+  .hosted-shell .brand > span:last-child {
+    display: none;
+  }
+  .hosted-account summary {
+    max-width: 88px;
+  }
+  .hosted-shell .status-middle {
+    display: block;
+    max-width: 45vw;
+  }
+  .hosted-job-status {
+    flex-wrap: wrap;
+  }
+}
