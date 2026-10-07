@@ -149,8 +149,16 @@ The hosted editor now offers **Use polygon**, which rasterizes a closed polygon
 on CPU and permits confirmation without a GPU request or inference quota.
 The original local entry point and its existing behavior remain separate.
 
+An isolated localhost service using the unchanged hosted authentication router
+and PostgreSQL 15 completed real Google consent, authorization-code exchange,
+signed identity-token validation, logout, and a second login to the same account.
+Rejecting consent created no account or session. Expiring that session in the
+isolated database caused the browser to return to the signed-out state. Separate
+controlled checks covered invalid/expired state, replay rejection, and PKCE.
+Only basic identity scopes were configured; no credentials are stored in Git.
+
 The CPU Docker image built successfully on Linux x86-64. These checks do not
-establish live Google OAuth, R2 credential isolation, public HTTPS, or public
+establish production Google OAuth, R2 credential isolation, public HTTPS, or public
 DNS readiness; those require the actual external configuration and launch tests.
 
 ## Remaining validation
