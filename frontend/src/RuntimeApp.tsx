@@ -25,7 +25,7 @@ export function PublicDocument({ page }: { page: "privacy" | "terms" }) {
           <p>
             Annotation is operated by Jemailabs. Questions and data requests can
             be sent to{" "}
-            <a href="mailto:jrterven@gmail.com">jrterven@gmail.com</a>.
+            <a href="mailto:support@jemailabs.com">support@jemailabs.com</a>.
           </p>
           <h2>Your account and projects</h2>
           <p>
@@ -70,7 +70,7 @@ export function PublicDocument({ page }: { page: "privacy" | "terms" }) {
           <p>
             Annotation provides browser-based image annotation and optional SAM
             3 segmentation. By using the service, you agree to these terms.
-            Contact <a href="mailto:jrterven@gmail.com">jrterven@gmail.com</a>{" "}
+            Contact <a href="mailto:support@jemailabs.com">support@jemailabs.com</a>{" "}
             for support.
           </p>
           <h2>Your content</h2>
