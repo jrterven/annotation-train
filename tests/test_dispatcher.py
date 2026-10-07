@@ -61,7 +61,7 @@ def setup(tmp_path):
                         google_client_secret="test", r2_endpoint_url="unused", r2_access_key_id="test",
                         r2_secret_access_key="test", primary_worker_url="http://primary", primary_worker_token="a" * 32,
                         fallback_worker_url="http://fallback", fallback_worker_token="b" * 32,
-                        data_dir=tmp_path, min_free_disk_bytes=0)
+                        data_dir=tmp_path, cache_dir=tmp_path / "cache", min_free_disk_bytes=0)
     db = Database(settings, engine=create_engine("sqlite://"))
     db.create_schema()
     objects = FilesystemStore(tmp_path / "objects")
@@ -237,3 +237,47 @@ def test_cpu_transport_bounds_even_a_misbehaving_worker_response(monkeypatch):
             transport.health(Worker("primary", "http://worker", "secret"))
     finally:
         transport.close()
+
+
+def test_repeated_segmentation_reuses_verified_image_without_r2_download(setup, monkeypatch):
+    _, db, dispatcher, transport, _, _ = setup
+    first = add(setup)
+    dispatcher.tick()
+    original = transport.requests[0][1]["image_base64"]
+    success(transport, state(db, first))
+    dispatcher.tick()
+    monkeypatch.setattr(dispatcher.objects, "get", lambda *_: (_ for _ in ()).throw(OSError("R2 unavailable")))
+    second = add(setup)
+    dispatcher.tick()
+    assert state(db, second).status == "running"
+    assert transport.requests[-1][1]["image_base64"] == original
+    assert transport.requests[-1][1]["attempt_id"] != transport.requests[0][1]["attempt_id"]
+
+
+def test_dispatcher_rechecks_queue_quickly_but_backs_off_unavailable_workers(setup):
+    _, _, dispatcher, transport, _, _ = setup
+    class Stop:
+        def __init__(self): self.delays = []
+        def is_set(self): return len(self.delays) == 1
+        def wait(self, seconds): self.delays.append(seconds)
+    transport.close = lambda: None
+    idle = Stop()
+    dispatcher.run(idle)
+    assert idle.delays == [0.2]
+    add(setup)
+    transport.down.update({"primary", "fallback"})
+    unavailable = Stop()
+    dispatcher.run(unavailable)
+    assert unavailable.delays == [5]
+    transport.down.clear()
+    active = Stop()
+    dispatcher.run(active)
+    assert active.delays == [0.2]
+
+
+def test_idle_dispatcher_does_not_query_gpu_health(setup, monkeypatch):
+    _, _, dispatcher, transport, _, _ = setup
+    calls = []
+    monkeypatch.setattr(transport, "health", lambda worker: calls.append(worker))
+    dispatcher.tick()
+    assert calls == []

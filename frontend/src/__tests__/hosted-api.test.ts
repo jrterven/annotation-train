@@ -104,7 +104,7 @@ describe("persistent inference jobs", () => {
         response({ id: "job-a", status: "succeeded", result }),
       );
     const task = api("/infer/text", "POST", { image_id: 7 });
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(1000);
     await expect(task).resolves.toEqual(result);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/api/v1/projects/private-project/infer/text",

@@ -32,6 +32,20 @@ The maintenance container runs the coordinated backup and reconciliation CLI.
 All four application processes use the same PostgreSQL metadata and the same
 project volume. PostgreSQL and `pg_dump` use major version 15 together.
 
+## Interactive latency
+
+The dispatcher checks the queue and active results every 200 ms, independently
+of the five-second retry interval when no GPU is available. Empty queues do not
+send GPU health requests. `ANNOTATION_DISPATCHER_POLL_MILLISECONDS` configures
+the interactive interval. The browser checks jobs every 500 ms and retains the
+one-second retry delay on network errors. Attempt fencing, cancellation, fair
+scheduling and the hard execution deadline remain unchanged.
+
+Inference reads originals through the existing 5 GB disposable SHA-256 cache,
+shared with authenticated image downloads, avoiding another R2 fetch on each
+click. Ownership and active image status are checked before using the cache;
+workers still receive validated original pixels without R2 credentials.
+
 ## Large source images
 
 Project originals have no fixed byte or megapixel ceiling. The account/global

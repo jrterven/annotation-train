@@ -33,6 +33,7 @@ class Settings:
     max_runtime_seconds: int = 120
     worker_grace_seconds: int = 5
     worker_poll_seconds: int = 5
+    dispatcher_poll_milliseconds: int = 200
     session_seconds: int = 7 * 86400
     min_free_disk_bytes: int = 100_000_000_000
 

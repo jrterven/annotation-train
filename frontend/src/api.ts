@@ -147,7 +147,7 @@ async function waitForJob<T>(
         );
       if (job.status === "cancelled")
         throw new DOMException("Request cancelled", "AbortError");
-      await delay(1000, signal);
+      await delay(failures ? 1000 : 500, signal);
       try {
         job = (await request<Job<T>>(url, "GET", undefined, signal)).data;
         failures = 0;

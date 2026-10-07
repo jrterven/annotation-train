@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 
 from .job_protocol import AttemptRequest, MAX_RESULT_BYTES
 from .models import Attempt, ImageObject, Job, Project, utcnow
+from .storage import ObjectCache
 
 LOG = logging.getLogger(__name__)
 TERMINAL = {"succeeded", "failed", "cancelled", "timed_out"}
@@ -74,6 +75,7 @@ class Dispatcher:
         self.settings, self.db, self.objects = settings, db, objects
         self.transport = transport or WorkerTransport()
         self.clock = clock
+        self.cache = ObjectCache(settings.cache_dir, settings.cache_limit_bytes)
         self.workers = {}
         for name in ("primary", "fallback"):
             url, token = getattr(settings, f"{name}_worker_url"), getattr(settings, f"{name}_worker_token")
@@ -126,7 +128,7 @@ class Dispatcher:
             if project is None or project.deleted_at is not None or image is None:
                 raise ValueError("Image is no longer available")
             object_key, digest = image.object_key, image.sha256
-        data = self.objects.get(object_key)
+        data = self.cache.get(self.objects, object_key, digest)
         request = AttemptRequest(job_id=job.id, attempt_id=job.attempt_id, project_id=job.project_id,
                                  image_id=job.image_id, sha256=digest, kind=job.kind, payload=job.payload,
                                  deadline_at=job.deadline_at.replace(tzinfo=timezone.utc).timestamp(),
@@ -266,24 +268,31 @@ class Dispatcher:
     def tick(self):
         with self.db.session() as session:
             running = session.scalar(select(Job).where(Job.status == "running").order_by(Job.created_at).limit(1))
+            queued = running is None and session.scalar(select(Job.id).where(Job.status == "queued").limit(1))
         if running:
             self._poll(running)
-            return
+            return True
+        if not queued:
+            return True  # Idle queue checks stay fast without pinging GPU hosts.
         worker = self._preferred()
-        if worker is not None:
-            job = self._claim(worker)
-            if job:
-                self._submit(job)
+        if worker is None:
+            return False  # Availability retries keep their slower cadence.
+        job = self._claim(worker)
+        if job:
+            self._submit(job)
+        return True
 
     def run(self, stop_event=None):
         stop_event = stop_event or threading.Event()
         try:
             while not stop_event.is_set():
+                delay = self.settings.worker_poll_seconds
                 try:
-                    self.tick()
+                    if self.tick():
+                        delay = self.settings.dispatcher_poll_milliseconds / 1000
                 except Exception:
                     LOG.error("Dispatcher tick failed; durable attempts will be recovered.")
-                stop_event.wait(self.settings.worker_poll_seconds)
+                stop_event.wait(delay)
         finally:
             self.transport.close()
 
