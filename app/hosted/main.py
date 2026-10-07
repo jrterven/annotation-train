@@ -364,7 +364,6 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             data = cache.get(objects, key, record.sha256)
         with Image.open(io.BytesIO(data)) as original:
             output = io.BytesIO()
-            original.thumbnail((8192, 8192))
             original.convert("RGB").save(output, format="PNG")
         return Response(output.getvalue(), media_type="image/png")
 

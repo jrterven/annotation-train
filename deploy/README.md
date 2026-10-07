@@ -42,9 +42,8 @@ and validate the complete decoded image before committing it to private R2.
 Interrupted reservations expire after one hour of inactivity; maintenance clears
 their temporary files. No bucket CORS or browser storage credentials are needed.
 
-Annotations and COCO always use original dimensions. The editor uses a display
-derivative up to 8192 pixels per side, independently of the original in R2 and
-SAM 3 input. Available memory, the 120-second GPU deadline and annotation output
+The editor, SAM 3 and COCO use original dimensions without downsampling the
+source. Available memory, the 120-second GPU deadline and annotation output
 budgets still apply; removing an image ceiling does not create unlimited RAM.
 The separate visual-example prompt keeps its existing input budget.
 
