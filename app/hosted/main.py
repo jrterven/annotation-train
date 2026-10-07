@@ -358,13 +358,22 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
     def image_file(project_id: str, image_id: int, request: Request, thumbnail: bool = False):
         with owned(request, project_id) as (session, project, store):
             record = image_record(session, project_id, image_id)
-            key = record.object_key
-            if thumbnail:
-                return Response(objects.get(key.rsplit("/", 1)[0] + "/thumbnail.png"), media_type="image/png")
-            data = cache.get(objects, key, record.sha256)
+            key, digest = record.object_key, record.sha256
+        # Network/disk I/O must not hold the shared quota/project locks.
+        if thumbnail:
+            return Response(objects.get(key.rsplit("/", 1)[0] + "/thumbnail.png"), media_type="image/png")
+        data = cache.get(objects, key, digest)
         with Image.open(io.BytesIO(data)) as original:
+            # Native browser formats need no full decode/re-encode. Do not let
+            # EXIF auto-rotation move pixels away from their annotation grid.
+            if (original.format in {"JPEG", "PNG", "WEBP"}
+                    and original.mode in {"RGB", "L", "P"} and "transparency" not in original.info
+                    and original.getexif().get(274, 1) == 1):
+                return Response(data, media_type=Image.MIME[original.format])
             output = io.BytesIO()
-            original.convert("RGB").save(output, format="PNG")
+            rgb = original.convert("RGB")
+            rgb.info.pop("exif", None)
+            rgb.save(output, format="PNG")
         return Response(output.getvalue(), media_type="image/png")
 
     @app.get("/api/v1/projects/{project_id}/images/{image_id}/state")

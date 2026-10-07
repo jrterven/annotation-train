@@ -430,3 +430,29 @@ def test_chunked_upload_enforces_reserved_bytes_and_releases_cancellation(hosted
     with db.session() as session:
         assert session.get(User, 'alice').reserved_bytes == 0
     assert not (settings.data_dir / 'uploads' / (uid + '.part')).exists()
+
+
+def test_native_image_response_preserves_original_bytes_and_exif_pixel_grid(hosted):
+    _, _, _, _, clients = hosted
+    client = clients['alice']
+    pid = client.post('/api/v1/projects', json={'name': 'Native originals'}).json()['id']
+    root = f'/api/v1/projects/{pid}'
+    source = Image.new('RGB', (120, 80), 'red')
+    for n, orientation in enumerate((1, 6), 1):
+        exif = Image.Exif(); exif[274] = orientation
+        data = io.BytesIO(); source.save(data, 'JPEG', exif=exif)
+        raw = data.getvalue()
+        assert client.post(root + '/images', files={'file': (f'original-{n}.jpg', raw)}).status_code == 201
+        result = client.get(root + f'/images/{n}/file')
+        assert result.headers['cache-control'] == 'private, no-store'
+        with Image.open(io.BytesIO(result.content)) as display:
+            assert display.size == (120, 80)
+            assert display.getexif().get(274, 1) == 1
+            with Image.open(io.BytesIO(raw)) as original:
+                assert display.convert('RGB').tobytes() == original.convert('RGB').tobytes()
+        if orientation == 1:
+            assert result.content == raw
+            assert result.headers['content-type'] == 'image/jpeg'
+        else:
+            assert result.headers['content-type'] == 'image/png'
+        assert clients['bob'].get(root + f'/images/{n}/file').status_code == 404

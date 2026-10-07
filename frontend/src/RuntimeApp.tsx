@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, LoaderCircle, ScanLine } from "lucide-react";
 import App from "./App";
+import { sourceImages } from "./imageCache";
 import {
   api,
   ApiError,
@@ -70,8 +71,9 @@ export function PublicDocument({ page }: { page: "privacy" | "terms" }) {
           <p>
             Annotation provides browser-based image annotation and optional SAM
             3 segmentation. By using the service, you agree to these terms.
-            Contact <a href="mailto:support@jemailabs.com">support@jemailabs.com</a>{" "}
-            for support.
+            Contact{" "}
+            <a href="mailto:support@jemailabs.com">support@jemailabs.com</a> for
+            support.
           </p>
           <h2>Your content</h2>
           <p>
@@ -169,10 +171,12 @@ export default function RuntimeApp() {
       const current = await api<HostedSession>("/auth/session");
       if (requestId !== sessionRequest.current) return;
       if (!current.user) {
+        sourceImages.clear();
         setExpired(true);
         return;
       }
       if (session?.user && current.user.id !== session.user.id) {
+        sourceImages.clear();
         setExpired(true);
         setError(
           `Sign in again as ${session.user.email} to keep working in this window.`,
@@ -189,13 +193,16 @@ export default function RuntimeApp() {
         requestId === sessionRequest.current &&
         error instanceof ApiError &&
         error.status === 401
-      )
+      ) {
+        sourceImages.clear();
         setExpired(true);
+      }
     }
   }
   useEffect(() => {
     if (mode !== "hosted" || !session?.user) return;
     const expire = () => {
+      sourceImages.clear();
       sessionRequest.current++;
       setExpired(true);
     };

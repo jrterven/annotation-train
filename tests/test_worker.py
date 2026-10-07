@@ -173,7 +173,8 @@ def test_blocked_large_pipe_write_does_not_block_watchdog(tmp_path):
     supervisor.start()
     try:
         until(lambda: supervisor.health()["ready"])
-        value = request(deadline_at=time.time() + .3, image_base64="A" * 2_000_000)
+        value = request(deadline_at=time.time() + .3, image_base64=base64.b64encode(b"A" * 2_000_000).decode(),
+                        sha256=hashlib.sha256(b"A" * 2_000_000).hexdigest())
         supervisor.submit(value)
         until(lambda: supervisor.get(str(value.attempt_id))["status"] == "timed_out")
         assert supervisor.process is None
@@ -304,3 +305,58 @@ def test_worker_accepts_large_target_original_without_pixel_or_byte_ceiling():
     image, digest = decode_image(value.image_base64)
     assert image.size == (4097, 4096)
     assert digest == value.sha256
+
+
+def test_worker_cache_miss_is_not_an_attempt_and_references_preserve_fencing(tmp_path):
+    supervisor = WorkerSupervisor(tmp_path / 'attempts.sqlite3', child_target=echo_child)
+    supervisor.start()
+    value = request(deadline_at=time.time() + 10)
+    reference = value.model_copy(update={'image_base64': None})
+    try:
+        until(lambda: supervisor.health()['ready'])
+        with pytest.raises(HTTPException) as error:
+            supervisor.submit(reference)
+        assert (error.value.status_code, error.value.detail) == (424, 'image_required')
+        assert supervisor.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0] == 0
+        supervisor.submit(value)
+        until(lambda: supervisor.get(str(value.attempt_id))['status'] == 'succeeded')
+        assert supervisor.submit(reference)['status'] == 'succeeded'
+        second = reference.model_copy(update={'attempt_id': uuid4(), 'job_id': uuid4()})
+        supervisor.submit(second)
+        until(lambda: supervisor.get(str(second.attempt_id))['status'] == 'succeeded')
+        assert supervisor.health()['image_cache']['hits'] == 1
+        assert supervisor.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0] == 2
+        foreign = second.model_copy(update={'attempt_id': uuid4(), 'job_id': uuid4(), 'project_id': uuid4()})
+        with pytest.raises(HTTPException) as error:
+            supervisor.submit(foreign)
+        assert error.value.status_code == 424
+        assert supervisor.active is None
+        # Restart/eviction is an ordinary miss, without accepting another attempt.
+        supervisor.images.entries.clear()
+        fresh = reference.model_copy(update={'attempt_id': uuid4(), 'job_id': uuid4()})
+        with pytest.raises(HTTPException) as error:
+            supervisor.submit(fresh)
+        assert error.value.status_code == 424
+    finally:
+        supervisor.close()
+
+
+def test_worker_image_cache_checks_integrity_expiry_and_memory_budget():
+    from app.hosted.image_cache import WorkerImageCache
+    now = [0]
+    cache = WorkerImageCache(max_bytes=8, ttl=10, clock=lambda: now[0])
+    def put(key, data):
+        cache.put(key, hashlib.sha256(data).hexdigest(), base64.b64encode(data).decode())
+    put('a', b'a'); put('b', b'b')
+    assert cache.get('a')
+    put('c', b'c')
+    assert cache.get('b') is None
+    assert cache.bytes == 8
+    with pytest.raises(ValueError, match='checksum'):
+        cache.put('a', '0' * 64, base64.b64encode(b'changed').decode())
+    assert cache.get('a') == base64.b64encode(b'a').decode()
+    put('large', b'x' * 100)
+    assert cache.get('large') is None  # Still executable inline; not retained.
+    now[0] = 11
+    cache.prune()
+    assert cache.bytes == 0 and not cache.entries

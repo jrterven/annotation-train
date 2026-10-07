@@ -1,3 +1,5 @@
+import { sourceImages } from "./imageCache";
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -19,15 +21,18 @@ export function configureApi(
   mode: "local" | "hosted",
   csrf: string | null = null,
 ) {
+  sourceImages.clear();
   hosted = mode === "hosted";
   csrfToken = csrf;
   projectId = "";
   projectDirectory = "";
 }
 export function setCsrfToken(value: string | null) {
+  if (csrfToken !== value) sourceImages.clear();
   csrfToken = value;
 }
 export function selectProject(project: { id?: string; directory?: string }) {
+  sourceImages.clear();
   projectId = project.id || "";
   projectDirectory = project.directory || "";
 }
@@ -80,8 +85,10 @@ async function request<T>(
     } catch {
       /* Non-JSON proxy errors retain the HTTP status. */
     }
-    if (hosted && res.status === 401)
+    if (hosted && res.status === 401) {
+      sourceImages.clear();
       window.dispatchEvent(new Event(sessionExpiredEvent));
+    }
     throw new ApiError(res.status, message);
   }
   return {

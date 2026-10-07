@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, select
 
 from app.hosted.config import Settings
 from app.hosted.database import Database
-from app.hosted.dispatcher import Dispatcher, Worker, WorkerTransport
+from app.hosted.dispatcher import Dispatcher, Worker, WorkerTransport, ImageRequired
 from app.hosted.jobs import cancel, enqueue
 from app.hosted.models import Attempt, ImageObject, InferenceUsage, Job, Project, User, utcnow
 from app.hosted.storage import FilesystemStore
@@ -32,11 +32,19 @@ class Transport:
         self.requests = []
         self.attempts = {}
         self.down = set()
+        self.images = {}
 
     def health(self, worker):
         return {"ready": worker.name not in self.down, "busy": False}
 
     def submit(self, worker, value):
+        if value["attempt_id"] in self.attempts:
+            return self.attempts[value["attempt_id"]]
+        key = (worker.name, value["project_id"], value["image_id"], value["sha256"])
+        if "image_base64" in value:
+            self.images[key] = value["image_base64"]
+        elif key not in self.images:
+            raise ImageRequired()
         self.requests.append((worker.name, value))
         response = {"job_id": value["job_id"], "attempt_id": value["attempt_id"], "status": "running"}
         self.attempts[value["attempt_id"]] = response
@@ -250,7 +258,8 @@ def test_repeated_segmentation_reuses_verified_image_without_r2_download(setup, 
     second = add(setup)
     dispatcher.tick()
     assert state(db, second).status == "running"
-    assert transport.requests[-1][1]["image_base64"] == original
+    assert "image_base64" not in transport.requests[-1][1]
+    assert original in transport.images.values()
     assert transport.requests[-1][1]["attempt_id"] != transport.requests[0][1]["attempt_id"]
 
 
@@ -281,3 +290,61 @@ def test_idle_dispatcher_does_not_query_gpu_health(setup, monkeypatch):
     monkeypatch.setattr(transport, "health", lambda worker: calls.append(worker))
     dispatcher.tick()
     assert calls == []
+
+
+def test_cache_miss_transport_is_explicit_and_bounded():
+    transport = WorkerTransport()
+    transport.client.close()
+    transport.client = httpx.Client(transport=httpx.MockTransport(
+        lambda _: httpx.Response(424, json={'detail': 'image_required'})))
+    try:
+        with pytest.raises(ImageRequired):
+            transport.submit(Worker('primary', 'http://worker', 'secret'), {})
+    finally:
+        transport.close()
+
+
+def test_evicted_worker_image_resends_same_attempt_from_cpu_cache(setup, monkeypatch):
+    _, db, dispatcher, transport, _, _ = setup
+    first = add(setup)
+    dispatcher.tick()
+    original = transport.requests[-1][1]['image_base64']
+    success(transport, state(db, first)); dispatcher.tick()
+    transport.images.clear()
+    monkeypatch.setattr(dispatcher.objects, 'get', lambda *_: (_ for _ in ()).throw(OSError('R2 unavailable')))
+    second = add(setup)
+    dispatcher.tick()
+    assert state(db, second).attempt_count == 1
+    assert transport.requests[-1][1]['image_base64'] == original
+    assert len(transport.requests) == 2
+
+
+def test_lost_cache_miss_response_replays_same_attempt_without_waiting_for_deadline(setup, monkeypatch):
+    _, db, dispatcher, transport, _, users = setup
+    original_submit = transport.submit
+    first_call = [True]
+    def lost(worker, value):
+        if first_call[0]:
+            first_call[0] = False
+            raise TimeoutError("Cache miss response lost")
+        return original_submit(worker, value)
+    monkeypatch.setattr(transport, "submit", lost)
+    original_status = transport.status
+    def status(worker, attempt_id):
+        if attempt_id not in transport.attempts:
+            raise httpx.HTTPStatusError("Not found", request=httpx.Request("GET", "http://worker/attempt"),
+                                        response=httpx.Response(404))
+        return original_status(worker, attempt_id)
+    monkeypatch.setattr(transport, "status", status)
+    job_id = add(setup); dispatcher.tick()
+    first = state(db, job_id)
+    assert first.started_at is None
+    dispatcher.tick()
+    current = state(db, job_id)
+    assert current.attempt_id == first.attempt_id and current.attempt_count == 1
+    assert len(transport.requests) == 1
+    success(transport, current); dispatcher.tick()
+    assert state(db, job_id).status == "succeeded"
+    with db.session() as session:
+        usage = session.get(InferenceUsage, (users[0][0], current.quota_day))
+        assert (usage.used, usage.reserved) == (1, 0)

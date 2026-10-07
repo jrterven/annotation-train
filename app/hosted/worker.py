@@ -25,6 +25,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from .job_protocol import AttemptRequest, ResultTooLarge, execute_inference
+from .image_cache import WorkerImageCache
 
 
 def _model_process(connection, expected_parent=None):
@@ -122,6 +123,7 @@ class WorkerSupervisor:
         self.thread = None
         self.sender = None
         self.next_cleanup_at = 0.0
+        self.images = WorkerImageCache(max_bytes=int(os.environ.get("ANNOTATION_WORKER_IMAGE_CACHE_BYTES", 512 * 1024 * 1024)))
 
     def _prune_results(self, now):
         # Retain only the small immutable replay fence. Source images/prompts
@@ -129,6 +131,7 @@ class WorkerSupervisor:
         self.db.execute("UPDATE attempts SET result=NULL,error='result_expired' WHERE finished < ? AND result IS NOT NULL",
                         (now - 86400,))
         self.db.commit()
+        self.images.prune()
         self.next_cleanup_at = now + 60
 
     def start(self):
@@ -230,7 +233,7 @@ class WorkerSupervisor:
 
     def health(self):
         with self.lock:
-            return {"ready": bool(self.ready and self.process and self.process.is_alive()), "busy": self.active is not None}
+            return {"ready": bool(self.ready and self.process and self.process.is_alive()), "busy": self.active is not None, "image_cache": self.images.stats()}
 
     def get(self, attempt_id: str):
         with self.lock:
@@ -245,10 +248,16 @@ class WorkerSupervisor:
         with self.lock:
             attempt_id = str(request.attempt_id)
             raw = request.model_dump(mode="json")
-            fingerprint = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            # Pixels are identified by their verified SHA-256. A replay with
+            # inline bytes or a cache reference is the same immutable request.
+            identity = {key: value for key, value in raw.items() if key != "image_base64"}
+            fingerprint = "v2:" + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             previous = self.db.execute("SELECT fingerprint FROM attempts WHERE id=?", (attempt_id,)).fetchone()
             if previous:
-                if not hmac.compare_digest(previous["fingerprint"], fingerprint):
+                comparison = fingerprint
+                if not previous["fingerprint"].startswith("v2:"):
+                    comparison = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                if not hmac.compare_digest(previous["fingerprint"], comparison):
                     raise HTTPException(409, "Attempt identity was already used for another request.")
                 return self.get(attempt_id)
             now = time.time()
@@ -258,6 +267,17 @@ class WorkerSupervisor:
                 raise HTTPException(409, "Worker is busy.")
             if not self.health()["ready"]:
                 raise HTTPException(503, "Worker is warming up.")
+            if request.image_base64 is None:
+                raw["image_base64"] = self.images.get(request.image_key)
+                if raw["image_base64"] is None:
+                    # No attempt is admitted on a miss. The CPU may send the
+                    # original once using exactly the same attempt/deadline.
+                    raise HTTPException(424, "image_required")
+            else:
+                try:
+                    self.images.put(request.image_key, request.sha256, request.image_base64)
+                except ValueError as exc:
+                    raise HTTPException(422, "Image checksum or encoding is invalid") from exc
             # Persist before touching the subprocess; restart can never repeat it.
             deadline = min(request.deadline_at, now + self.max_runtime)
             self.db.execute("INSERT INTO attempts(id,job_id,fingerprint,deadline,status) VALUES (?,?,?,?,'running')",
@@ -298,6 +318,8 @@ class WorkerSupervisor:
             terminated = self._kill()
             if self.active and terminated:
                 self._finish(self.active, "failed", error="worker_shutdown")
+            self.images.entries.clear()
+            self.images.bytes = 0
             self.db.close()
 
 

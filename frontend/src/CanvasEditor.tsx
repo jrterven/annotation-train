@@ -23,6 +23,7 @@ import type {
 } from "./types";
 import { maskContains, maskURL } from "./masks";
 import { assetURL } from "./api";
+import { sourceImages } from "./imageCache";
 export type Vertex = { component: number; ring: number; index: number };
 type Props = {
   image: SourceImage;
@@ -45,21 +46,39 @@ type Props = {
   onGeometry: (id: string, components: Component[]) => void;
   fitRef: React.RefObject<(() => void) | null>;
 };
-function useImage(url: string) {
-  const [image, setImage] = useState<HTMLImageElement>();
+function useImage(url: string, remember = false) {
+  const [loaded, setLoaded] = useState<{
+    url: string;
+    image: HTMLImageElement;
+  }>();
   useEffect(() => {
     let valid = true;
-    setImage(undefined);
-    const img = new window.Image();
-    img.onload = () => {
-      if (valid) setImage(img);
+    if (remember) {
+      void sourceImages
+        .load(url)
+        .then((image) => {
+          if (valid) setLoaded({ url, image });
+        })
+        .catch(() => {});
+      return () => {
+        valid = false;
+      };
+    }
+    const image = new window.Image();
+    image.onload = () => {
+      if (valid) setLoaded({ url, image });
     };
-    img.src = url;
+    image.src = url;
     return () => {
       valid = false;
     };
-  }, [url]);
-  return image;
+  }, [url, remember]);
+  // Never paint the previous image while a different URL is loading.
+  return loaded?.url === url
+    ? loaded.image
+    : remember
+      ? sourceImages.peek(url)
+      : undefined;
 }
 function MaskImage({
   mask,
@@ -142,7 +161,8 @@ export default function CanvasEditor(p: Props) {
     id: string;
     vertices: XY[];
   } | null>(null);
-  const source = useImage(assetURL(`/images/${p.image.id}/file`));
+  const sourceURL = assetURL(`/images/${p.image.id}/file`);
+  const source = useImage(sourceURL, sourceURL.startsWith("/api/v1/"));
   const fit = Math.min(
     (size.width - 100) / p.image.width,
     (size.height - 100) / p.image.height,

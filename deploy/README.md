@@ -46,6 +46,25 @@ shared with authenticated image downloads, avoiding another R2 fetch on each
 click. Ownership and active image status are checked before using the cache;
 workers still receive validated original pixels without R2 credentials.
 
+Workers retain originals in a 512 MiB RAM LRU for 30 minutes of inactivity
+(`ANNOTATION_WORKER_IMAGE_CACHE_BYTES` changes the byte budget). Keys include
+project UUID, image ID and verified SHA-256. New attempts send only that identity
+and their prompt. A cold/evicted worker returns `424 image_required` before
+admitting the attempt; the dispatcher sends the original with the same attempt
+ID, deadline and quota reservation. Results and fingerprints remain fenced
+across restarts. Pixels never enter the persistent attempt ledger. Roll out the
+worker protocol before the CPU dispatcher; workers also accept inline originals
+from the previous dispatcher.
+
+Compatible JPEG, PNG and WebP originals are served directly, without recompression
+or resizing. Sources with EXIF rotation or formats requiring conversion retain
+the original coordinate grid via PNG without rotation metadata. Authorization
+and `private, no-store` apply to every image endpoint. The browser additionally
+keeps up to four decoded originals (estimated 256 MiB pixel budget) in tab memory
+and preloads one next image after the current image finishes. Session/project
+changes clear this cache, including pending requests; no persistent browser
+storage or public/shared HTTP caching is used.
+
 ## Large source images
 
 Project originals have no fixed byte or megapixel ceiling. The account/global

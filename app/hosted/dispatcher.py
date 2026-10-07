@@ -36,6 +36,10 @@ class Worker:
     token: str
 
 
+class ImageRequired(Exception):
+    """Worker definitively did not admit this attempt: supply the original."""
+
+
 class WorkerTransport:
     def __init__(self):
         self.client = httpx.Client(timeout=httpx.Timeout(10, connect=3, write=15), trust_env=False)
@@ -43,12 +47,15 @@ class WorkerTransport:
     def call(self, worker, method, path, payload=None):
         with self.client.stream(method, worker.url.rstrip("/") + path,
                                 headers={"Authorization": f"Bearer {worker.token}"}, json=payload) as response:
-            response.raise_for_status()
             body = bytearray()
             for chunk in response.iter_bytes():
                 if len(body) + len(chunk) > MAX_WORKER_RESPONSE_BYTES:
                     raise ValueError("Worker response exceeds the output limit")
                 body.extend(chunk)
+            if (response.status_code == 424 and method == "POST" and path == "/v1/attempts"
+                    and json.loads(body).get("detail") == "image_required"):
+                raise ImageRequired()
+            response.raise_for_status()
             value = json.loads(body)
         if not isinstance(value, dict):
             raise ValueError("Invalid worker response")
@@ -119,7 +126,7 @@ class Dispatcher:
             self._new_attempt(session, job, worker, self.clock())
             return job
 
-    def _payload(self, job):
+    def _payload(self, job, *, include_image=False):
         with self.db.session() as session:
             project = session.get(Project, job.project_id)
             image = session.scalar(select(ImageObject).where(ImageObject.project_id == job.project_id,
@@ -128,12 +135,12 @@ class Dispatcher:
             if project is None or project.deleted_at is not None or image is None:
                 raise ValueError("Image is no longer available")
             object_key, digest = image.object_key, image.sha256
-        data = self.cache.get(self.objects, object_key, digest)
+        data = self.cache.get(self.objects, object_key, digest) if include_image else None
         request = AttemptRequest(job_id=job.id, attempt_id=job.attempt_id, project_id=job.project_id,
                                  image_id=job.image_id, sha256=digest, kind=job.kind, payload=job.payload,
                                  deadline_at=job.deadline_at.replace(tzinfo=timezone.utc).timestamp(),
-                                 image_base64=base64.b64encode(data).decode("ascii"))
-        return request.model_dump(mode="json")
+                                 image_base64=base64.b64encode(data).decode("ascii") if data is not None else None)
+        return request.model_dump(mode="json", exclude_none=True)
 
     def _accepted(self, job, response):
         if response.get("attempt_id") != job.attempt_id or response.get("job_id") != job.id:
@@ -200,27 +207,29 @@ class Dispatcher:
         worker = self.workers.get(job.worker_name)
         if worker is None:
             return  # Changed config: lease must expire before another attempt.
-        try:
-            payload = self._payload(job)
-        except ValueError:
-            self._complete(job, {"status": "failed", "error": "invalid_input"})
-            return
-        except Exception:
-            # No HTTP request was sent, so this failure is safe to finalize now.
-            self._complete(job, {"status": "failed", "error": "storage_unavailable"})
-            return
-        # Recheck cancellation/fencing after fetching R2 and before sending bytes.
-        with self.db.session() as session:
-            current = session.get(Job, job.id)
-            if current is None or current.status != "running" or current.attempt_id != job.attempt_id or current.cancel_requested:
+        for include_image in (False, True):
+            try:
+                payload = self._payload(job, include_image=include_image)
+            except ValueError:
+                self._complete(job, {"status": "failed", "error": "invalid_input"})
                 return
-        try:
-            response = self.transport.submit(worker, payload)
-            self._handle(job, response)
-        except Exception:
-            # Timeout is ambiguous. Poll the same identity; never invent a retry
-            # until confirmed termination or the hard execution lease expires.
-            return
+            except Exception:
+                self._complete(job, {"status": "failed", "error": "storage_unavailable"})
+                return
+            # Recheck ownership/fencing after a cache miss may have fetched R2.
+            with self.db.session() as session:
+                current = session.get(Job, job.id)
+                if current is None or current.status != "running" or current.attempt_id != job.attempt_id or current.cancel_requested:
+                    return
+            try:
+                response = self.transport.submit(worker, payload)
+                self._handle(job, response)
+                return
+            except ImageRequired:
+                continue  # Same attempt and quota; this was not an execution.
+            except Exception:
+                # Network timeouts remain ambiguous; poll the persisted identity.
+                return
 
     def _poll(self, job):
         worker = self.workers.get(job.worker_name)
@@ -248,7 +257,13 @@ class Dispatcher:
                 if retry:
                     self._submit(retry)
                 return
-        except Exception:
+        except Exception as exc:
+            if (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
+                    and not job.cancel_requested and not lease_expired):
+                # A cache-miss response may have been lost. Replay the SAME
+                # identity; the durable worker ledger prevents double execution.
+                self._submit(job)
+                return
             # A short interruption is tolerated; after 20s try a fenced kill.
             if worker and not lease_expired and not job.cancel_requested and now - job.heartbeat_at >= timedelta(seconds=20):
                 try:

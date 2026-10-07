@@ -47,6 +47,7 @@ import {
   uid,
 } from "./api";
 import type { JobProgress } from "./api";
+import { sourceImages, imageCacheBudget } from "./imageCache";
 import type {
   Annotation,
   Category,
@@ -338,6 +339,33 @@ export default function App({
       active = false;
     };
   }, [imageId, project?.id, project?.directory, sessionToken.current]);
+  useEffect(() => {
+    if (!hosted || !currentImage || !project) return;
+    let active = true;
+    const next = project.images[imageIndex + 1];
+    const currentURL = assetURL(`/images/${currentImage.id}/file`);
+    const nextURL = next ? assetURL(`/images/${next.id}/file`) : null;
+    // Start the source fetch alongside annotation loading. Preload only one
+    // neighbor after the selected image is decoded, within the memory budget.
+    void sourceImages
+      .load(currentURL)
+      .then(() => {
+        if (
+          active &&
+          nextURL &&
+          next &&
+          4 *
+            (currentImage.width * currentImage.height +
+              next.width * next.height) <=
+            imageCacheBudget
+        )
+          void sourceImages.load(nextURL).catch(() => {});
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [hosted, imageId, project?.id, project?.images.length]);
   useEffect(() => {
     if (!toast) return;
     const timeout = setTimeout(() => setToast(null), 6500);

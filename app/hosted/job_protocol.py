@@ -71,7 +71,7 @@ class AttemptRequest(StrictModel):
     deadline_at: float = Field(gt=0)
     kind: Literal["points", "text", "visual"]
     payload: dict[str, Any]
-    image_base64: str = Field(min_length=1)
+    image_base64: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def validate_prompt(self):
@@ -132,6 +132,8 @@ def execute_inference(engine, translator, request: AttemptRequest) -> dict:
     """Same masks, proposals and revisions as the local editor's API."""
     from app.geometry import mask_payload
 
+    if request.image_base64 is None:
+        raise ValueError("The target image is missing")
     image, digest = decode_image(request.image_base64)
     if digest != request.sha256:
         raise ValueError("Image checksum does not match its immutable identity.")
