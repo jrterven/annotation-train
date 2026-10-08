@@ -229,6 +229,8 @@ Internal editing handles can belong to holes in the predicted mask, including si
 
 The top toolbar contains the text prompt and a **Prompt language** selector. Choose **English** or **Spanish**, enter a short object description, and press Enter to generate proposals. Select and accept multiple proposals, or refine one with clicks. A text search does not create or rename classes.
 
+When several proposals belong to one object, select at least two and choose **Merge selected**. This accepts their exact mask union as one instance in the active class, ready for vertex editing. Overlapping pixels count once; holes and disconnected parts remain unless another selected mask covers them. Unselected proposals, existing annotations, and any draft stay intact. The merge supports undo/redo, autosave, reopening, and COCO export in both local and hosted modes. **Accept selected** still creates separate instances. Merging uses the existing masks and does not run SAM again or consume an inference request. This action works on proposals from both text and visual examples; merging already confirmed annotations is not included.
+
 Spanish prompts are translated to English locally with the public [Helsinki-NLP/opus-mt-es-en model](https://huggingface.co/Helsinki-NLP/opus-mt-es-en), licensed under [Apache 2.0](https://huggingface.co/Helsinki-NLP/opus-mt-es-en/blob/main/README.md). The first Spanish request downloads approximately **312 MB**; translation then runs on CPU using cached weights, including offline. It is free to run locally and requires no translation API key or per-request payment. This is separate from the gated SAM 3 access above.
 
 The English text sent to SAM is displayed with the results so you can review it. Translation can change the intended meaning: if needed, select English, edit the wording, and run the search again. English prompts bypass translation. Images and prompt text are not sent to a translation service.
@@ -238,7 +240,7 @@ The English text sent to SAM is displayed with the results so you can review it.
 1. Click **Upload visual example** next to the text prompt and choose a PNG, JPEG, or WebP image (up to 10 MiB and 16 megapixels).
 2. Drag a box around one example object in the preview, then click **Use example**. The box is required; keep some surrounding context in the uploaded photo.
 3. Generate proposals with the reference alone, or add a short text description to narrow the concept. The language selector applies to this optional text.
-4. Select and accept matching proposals, or refine one with positive/negative clicks before confirming it.
+4. Select and accept matching proposals, use **Merge selected** to combine several into one instance, or refine one with positive/negative clicks before confirming it.
 
 ![Selecting an object in an uploaded visual example before generating SAM 3 proposals](docs/screenshots/visual-reference.png)
 
