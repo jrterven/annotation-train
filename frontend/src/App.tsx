@@ -68,6 +68,14 @@ import type {
 import { useWorkspace } from "./persistence";
 import CanvasEditor from "./CanvasEditor";
 import DetectionEditor from "./DetectionEditor";
+import {
+  useEditorInference,
+  useEditorShortcuts,
+  proposalCandidates,
+  acceptCandidates,
+  type TextPrompt,
+} from "./editorController";
+import ClassPanel from "./ClassPanel";
 import ExportDialog, { downloadExport } from "./ExportDialog";
 import type { Vertex } from "./CanvasEditor";
 import { FileBrowser, ProjectDialog } from "./ProjectDialog";
@@ -91,17 +99,6 @@ const signature = (part: Part) =>
     seed_mask: part.seed_mask,
     polygon: part.polygon,
   });
-type TextPrompt = {
-  original: string;
-  english: string;
-  source_language: "en" | "es";
-};
-type Pending = {
-  controller: AbortController;
-  token: string;
-  imageId: number;
-  kind: string;
-};
 export default function App({
   hostedSession,
   onLogout,
@@ -162,7 +159,6 @@ export default function App({
   const [mergingProposals, setMergingProposals] = useState(false);
   const [maxHoleArea, setMaxHoleArea] = useState("16");
   const [workVersion, setWorkVersion] = useState(0);
-  const pending = useRef(new Map<string, Pending>());
   const partErrors = useRef(new Map<string, string>());
   const fitRef = useRef<(() => void) | null>(null);
   const geometryToken = useRef("");
@@ -170,6 +166,8 @@ export default function App({
   const activeImage = useRef(imageId);
   activeImage.current = imageId;
   const workspace = useWorkspace(setToast);
+  const inference = useEditorInference("segmentation", workspace);
+  const { pending } = inference;
   const currentImage = project?.images.find((i) => i.id === imageId);
   const state = imageId === null ? undefined : workspace.get(imageId);
   const entry = imageId === null ? undefined : workspace.entry(imageId);
@@ -205,8 +203,7 @@ export default function App({
     setWorkVersion((v) => v + 1);
   }
   function abortAll() {
-    for (const p of pending.current.values()) p.controller.abort();
-    pending.current.clear();
+    inference.cancel();
     partErrors.current.clear();
     invalidate();
   }
@@ -254,8 +251,6 @@ export default function App({
   useEffect(
     () => () => {
       geometryToken.current = "";
-      for (const request of pending.current.values())
-        request.controller.abort();
     },
     [],
   );
@@ -403,29 +398,18 @@ export default function App({
   }
   async function inferPart(id: number, draftId: string, part: Part) {
     const key = `part:${id}:${part.id}`;
-    pending.current.get(key)?.controller.abort();
     partErrors.current.delete(key);
-    const controller = new AbortController();
-    const token = uid();
-    pending.current.set(key, {
-      controller,
-      token,
-      imageId: id,
-      kind: "points",
-    });
-    invalidate();
     let captured = signature(part);
-    const revision = workspace.get(id)?.revision || 0;
-    const isCurrent = () => {
+    const request = inference.begin(key, id, "points", () => {
       const fresh = workspace.get(id);
       const freshPart = fresh?.draft?.parts.find((p) => p.id === part.id);
       return (
-        pending.current.get(key)?.token === token &&
         fresh?.draft?.id === draftId &&
         !!freshPart &&
         signature(freshPart) === captured
       );
-    };
+    });
+    const { controller, isCurrent } = request;
     try {
       if (part.polygon && !part.seed_mask) {
         if (!part.polygon.closed)
@@ -458,15 +442,8 @@ export default function App({
           false,
         );
       }
-      const result = await api<
-        GeometryResult & { image_id: number; revision: number }
-      >(
-        "/infer/points",
-        "POST",
-        { image_id: id, revision, part },
-        controller.signal,
-      );
-      if (!isCurrent() || result.image_id !== id) return;
+      const result = await request.points(part);
+      if (!result) return;
       workspace.update(
         id,
         (s) => ({
@@ -497,14 +474,12 @@ export default function App({
       )
         setTool((current) => (current === "polygon" ? "positive" : current));
     } catch (e) {
-      if (isCurrent() && !(e instanceof Error && e.name === "AbortError")) {
-        const message = errorText(e);
+      request.error(e, (message) => {
         partErrors.current.set(key, message);
         setToast(`SAM 3: ${message}`);
-      }
+      });
     } finally {
-      if (pending.current.get(key)?.token === token)
-        pending.current.delete(key);
+      request.finish();
       invalidate();
     }
   }
@@ -527,8 +502,7 @@ export default function App({
       draft.active_part_id = original.id;
     }
     const key = `part:${imageId}:${original.id}`;
-    pending.current.get(key)?.controller.abort();
-    pending.current.delete(key);
+    inference.cancel((_request, pendingKey) => pendingKey === key);
     partErrors.current.delete(key);
     draft.parts[index] = {
       id: original.id,
@@ -683,8 +657,7 @@ export default function App({
   function removePart(id: string) {
     if (!state?.draft) return;
     const key = `part:${imageId}:${id}`;
-    pending.current.get(key)?.controller.abort();
-    pending.current.delete(key);
+    inference.cancel((_request, pendingKey) => pendingKey === key);
     partErrors.current.delete(key);
     invalidate();
     update((s) => {
@@ -710,8 +683,7 @@ export default function App({
     if (!state?.draft) return;
     for (const part of state.draft.parts) {
       const key = `part:${imageId}:${part.id}`;
-      pending.current.get(key)?.controller.abort();
-      pending.current.delete(key);
+      inference.cancel((_request, pendingKey) => pendingKey === key);
       partErrors.current.delete(key);
     }
     invalidate();
@@ -766,12 +738,7 @@ export default function App({
   }
   function cancelProposalSearches() {
     visualRevision.current++;
-    for (const [key, request] of pending.current) {
-      if (request.kind === "text") {
-        request.controller.abort();
-        pending.current.delete(key);
-      }
-    }
+    inference.cancel((request) => request.kind === "text");
     invalidate();
   }
   function changeVisualExample(value: VisualExample | null) {
@@ -789,49 +756,33 @@ export default function App({
       return;
     const id = imageId,
       key = `text:${id}`;
-    pending.current.get(key)?.controller.abort();
-    const controller = new AbortController(),
-      token = uid(),
-      currentSession = sessionToken.current,
+    const currentSession = sessionToken.current,
       referenceRevision = visualRevision.current;
-    pending.current.set(key, { controller, token, imageId: id, kind: "text" });
-    invalidate();
+    const original = JSON.stringify(state.proposals);
+    const request = inference.begin(
+      key,
+      id,
+      "text",
+      () =>
+        currentSession === sessionToken.current &&
+        referenceRevision === visualRevision.current &&
+        JSON.stringify(workspace.get(id)?.proposals) === original,
+    );
     try {
-      const result = await api<{
-        image_id: number;
-        revision: number;
-        proposals: Proposal[];
-        prompt?: TextPrompt;
-      }>(
-        visualExample ? "/infer/visual" : "/infer/text",
-        "POST",
-        {
-          image_id: id,
-          revision: state.revision,
-          text: text.trim(),
-          source_language: promptLanguage,
-          category_id: categoryId,
-          ...(visualExample
-            ? {
-                reference_image: visualExample.base64,
-                ...(visualExample.box
-                  ? { reference_box: visualExample.box }
-                  : {}),
-              }
-            : {}),
-        },
-        controller.signal,
+      const result = await request.concept(
+        text,
+        promptLanguage,
+        categoryId,
+        visualExample,
       );
-      if (
-        pending.current.get(key)?.token !== token ||
-        currentSession !== sessionToken.current ||
-        referenceRevision !== visualRevision.current ||
-        result.image_id !== id
-      )
-        return;
+      if (!result) return;
       workspace.update(id, (s) => ({
         ...s,
-        proposals: result.proposals.map((p) => ({ ...p, selected: false })),
+        proposals: proposalCandidates(
+          "segmentation",
+          result.proposals,
+          categoryId,
+        ),
       }));
       const usedPrompt = result.prompt;
       setTextPrompts((prompts) => {
@@ -853,15 +804,9 @@ export default function App({
               : "No objects found. Try a short description in English.",
         );
     } catch (e) {
-      if (
-        pending.current.get(key)?.token === token &&
-        !(e instanceof Error && e.name === "AbortError")
-      )
-        setToast(`SAM 3: ${errorText(e)}`);
+      request.error(e, (message) => setToast(`SAM 3: ${message}`));
     } finally {
-      if (pending.current.get(key)?.token === token)
-        pending.current.delete(key);
-      invalidate();
+      request.finish();
     }
   }
   function acceptProposals() {
@@ -872,20 +817,18 @@ export default function App({
       !selectedProposals.length
     )
       return;
-    update((s) => ({
-      ...s,
-      annotations: [
-        ...s.annotations,
-        ...s.proposals
-          .filter((p) => p.selected)
-          .map(({ score: _score, selected: _selected, ...p }) => ({
-            ...p,
-            id: uid(),
-            category_id: categoryId,
-          })),
-      ],
-      proposals: s.proposals.filter((p) => !p.selected),
-    }));
+    update((s) => {
+      const { accepted, remaining } = acceptCandidates(s.proposals, (p) => ({
+        ...p,
+        id: uid(),
+        category_id: categoryId,
+      }));
+      return {
+        ...s,
+        annotations: [...s.annotations, ...accepted],
+        proposals: remaining,
+      };
+    });
     setTool("select");
   }
   async function mergeProposals() {
@@ -1093,12 +1036,7 @@ export default function App({
   }
   function undo(redo = false) {
     if (imageId === null || geometryBusy || confirming) return;
-    for (const [key, value] of pending.current) {
-      if (value.imageId === imageId) {
-        value.controller.abort();
-        pending.current.delete(key);
-      }
-    }
+    inference.cancel((request) => request.imageId === imageId);
     invalidate();
     workspace.history(imageId, redo);
     const restored = workspace.get(imageId)?.draft;
@@ -1221,76 +1159,44 @@ export default function App({
     a.click();
     URL.revokeObjectURL(url);
   }
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (
-        /INPUT|TEXTAREA|SELECT/.test(target.tagName) ||
-        target.isContentEditable
-      )
-        return;
-      if (
-        projectDialog ||
-        help ||
-        categoryDialog ||
-        relink ||
-        conflictDialog ||
-        uploadDialog ||
-        visualDialogOpen ||
-        exportDialog
-      )
-        return;
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        void saveAll();
-        return;
-      }
-      if (task === "detection") return;
-      if (mod && e.key.toLowerCase() === "z") {
-        e.preventDefault();
-        undo(e.shiftKey);
-        return;
-      }
-      if (mod && e.key.toLowerCase() === "y") {
-        e.preventDefault();
-        undo(true);
-        return;
-      }
-      if (mod) return;
-      if (e.key === "Enter") {
-        e.preventDefault();
-        if (activePolygon && !activePolygon.closed) closePolygon();
-        else void confirmDraft();
-      } else if (e.key === "Escape") {
-        setSelected(null);
-        setVertex(null);
-        setTool("select");
-      } else if (e.key === "Delete" || e.key === "Backspace") {
-        e.preventDefault();
-        removeSelected();
-      } else if (e.key === "ArrowDown" && !selected) {
-        e.preventDefault();
-        navigate(imageIndex + 1);
-      } else if (e.key === "ArrowUp" && !selected) {
-        e.preventDefault();
-        navigate(imageIndex - 1);
-      } else if (e.key.toLowerCase() === "v") setTool("select");
-      else if (e.key.toLowerCase() === "p") setTool("positive");
-      else if (e.key.toLowerCase() === "n") resumeDraft();
-      else if (e.key === "-" || e.key.toLowerCase() === "e")
-        setTool("negative");
-      else if (e.key.toLowerCase() === "b") setTool("box");
-      else if (e.key.toLowerCase() === "g") {
+  useEditorShortcuts({
+    active: task === "segmentation",
+    selected,
+    blocked: !!(
+      projectDialog ||
+      help ||
+      categoryDialog ||
+      relink ||
+      conflictDialog ||
+      uploadDialog ||
+      visualDialogOpen ||
+      exportDialog
+    ),
+    onSave: () => void saveAll(),
+    onHistory: undo,
+    onConfirm: () => {
+      if (activePolygon && !activePolygon.closed) closePolygon();
+      else void confirmDraft();
+    },
+    onEscape: () => {
+      setSelected(null);
+      setVertex(null);
+      setTool("select");
+    },
+    onDelete: removeSelected,
+    onNavigate: (offset) => navigate(imageIndex + offset),
+    onTool: setTool,
+    onFit: () => fitRef.current?.(),
+    extra: {
+      n: resumeDraft,
+      g: () => {
         setTool("polygon");
         setSelected(null);
         setVertex(null);
-      } else if (e.key.toLowerCase() === "f") fitRef.current?.();
-      else if (e.key.toLowerCase() === "h") setShowMasks((v) => !v);
-      else if (e.key === "?") setHelp(true);
-    };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
+      },
+      h: () => setShowMasks((v) => !v),
+      "?": () => setHelp(true),
+    },
   });
   const modelReady = ["ready", "loaded"].includes(model.state);
   const readyToConfirm =
@@ -2313,35 +2219,16 @@ export default function App({
                   </section>
                 )}
                 <div className="inspector-bottom">
-                  <section className="classes-panel">
-                    <div className="panel-label">
-                      <span>Classes</span>
-                      <IconButton
-                        icon={Plus}
-                        title="Create class"
-                        onClick={() => editCategory("new")}
-                      />
-                    </div>
-                    <div className="category-chips">
-                      {project.categories.map((c) => (
-                        <button
-                          key={c.id}
-                          className={categoryId === c.id ? "active" : ""}
-                          onClick={() => setCategoryId(c.id)}
-                          onDoubleClick={() => editCategory(c)}
-                          title={`${c.name} · double-click to edit`}
-                        >
-                          <i style={{ background: c.color }} />
-                          {c.name}
-                        </button>
-                      ))}
-                      {!project.categories.length && (
-                        <button onClick={() => editCategory("new")}>
-                          <Plus size={12} /> Create first class
-                        </button>
-                      )}
-                    </div>
-                  </section>
+                  <ClassPanel
+                    categories={project.categories}
+                    categoryId={categoryId}
+                    onSelect={setCategoryId}
+                    onEdit={(id) =>
+                      editCategory(project.categories.find((c) => c.id === id)!)
+                    }
+                    onCreate={() => editCategory("new")}
+                  />
+
                   <label className="checkbox-label mask-box-toggle">
                     <input
                       type="checkbox"

@@ -167,7 +167,11 @@ class ProjectStore:
 
     def require_client(self, version: str | None) -> None:
         with self._connect() as connection:
-            current = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+            self._require_client(connection, version)
+
+    @staticmethod
+    def _require_client(connection, version: str | None) -> None:
+        current = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
         if current == "2" and version != "2":
             raise ValueError("This project uses annotation format v2. Reload/update the editor before continuing.")
 
@@ -281,8 +285,12 @@ class ProjectStore:
                 raise ValueError(f"The image has changed since import: {row['file_name']}")
         return path
 
-    def get_state(self, image_id: int, *, include_previews: bool = True) -> dict:
+    def get_state(self, image_id: int, *, include_previews: bool = True, client_version: str | None = "2") -> dict:
         with self._connect() as connection:
+            # The version, state and categories must belong to one read snapshot.
+            # Internal readers support v2; HTTP callers supply their actual header.
+            connection.execute("BEGIN")
+            self._require_client(connection, client_version)
             state = json.loads(self._image_row(connection, image_id)["state"])
             colors = {row["id"]: json.loads(row["data"])["color"]
                       for row in connection.execute("SELECT * FROM categories")}
@@ -450,11 +458,12 @@ class ProjectStore:
         _json(result)
         return result
 
-    def save_state(self, image_id: int, state: dict, *, include_previews: bool = True) -> dict:
+    def save_state(self, image_id: int, state: dict, *, include_previews: bool = True, client_version: str | None = "2") -> dict:
         if not isinstance(state, dict):
             raise ValueError("The state must be a JSON object.")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_client(connection, client_version)
             row = self._image_row(connection, image_id)
             if state.get("revision") != row["revision"]:
                 raise RevisionConflict("The image has newer changes. Reload its state before saving.")

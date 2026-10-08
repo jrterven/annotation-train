@@ -19,15 +19,20 @@ import type {
   BoxAnnotation,
   BoxDraft,
   DetectionState,
-  GeometryResult,
   Project,
-  Proposal,
   SourceImage,
   Tool,
   XY,
 } from "./types";
 import type { Workspace } from "./persistence";
-import { api, errorText, uid } from "./api";
+import { uid } from "./api";
+import {
+  useEditorInference,
+  useEditorShortcuts,
+  proposalCandidates,
+  acceptCandidates,
+} from "./editorController";
+import ClassPanel from "./ClassPanel";
 import { maskBounds } from "./masks";
 import { xywh, xyxy } from "./boxes";
 import CanvasEditor from "./CanvasEditor";
@@ -57,8 +62,8 @@ export default function DetectionEditor(p: Props) {
   const [language, setLanguage] = useState<"en" | "es">("en");
   const [visual, setVisual] = useState<VisualExample | null>(null);
   const [visualOpen, setVisualOpen] = useState(false);
-  const [, render] = useState(0);
-  const pending = useRef(new Map<string, AbortController>());
+  const inference = useEditorInference("detection", p.workspace);
+  const { pending } = inference;
   const fitRef = useRef<(() => void) | null>(null);
   const id = p.image?.id;
   const state = id === undefined ? undefined : p.workspace.getDetection(id);
@@ -75,13 +80,6 @@ export default function DetectionEditor(p: Props) {
     setSelected(null);
     setTool("box");
   }, [id]);
-  useEffect(
-    () => () => {
-      for (const request of pending.current.values()) request.abort();
-      pending.current.clear();
-    },
-    [],
-  );
   function update(fn: (s: DetectionState) => DetectionState, history = true) {
     if (id !== undefined) p.workspace.updateDetection(id, fn, history);
   }
@@ -159,27 +157,14 @@ export default function DetectionEditor(p: Props) {
     setSelected(null);
   }
   function begin(imageId: number, kind: string) {
-    const key = `${imageId}:${kind}`;
-    pending.current.get(key)?.abort();
-    const controller = new AbortController();
-    pending.current.set(key, controller);
-    render((v) => v + 1);
-    const sourceEntry = p.workspace.entry(imageId);
-    const generation = sourceEntry?.detectionGeneration;
-    return {
-      controller,
-      isCurrent: () =>
-        pending.current.get(key) === controller &&
-        !controller.signal.aborted &&
-        p.workspace.entry(imageId) === sourceEntry &&
-        sourceEntry?.detectionGeneration === generation,
-      finish: () => {
-        if (pending.current.get(key) === controller) {
-          pending.current.delete(key);
-          render((v) => v + 1);
-        }
-      },
-    };
+    const entry = p.workspace.entry(imageId),
+      generation = entry?.detectionGeneration;
+    return inference.begin(
+      `${imageId}:${kind}`,
+      imageId,
+      kind,
+      () => entry?.detectionGeneration === generation,
+    );
   }
   async function adjust() {
     if (
@@ -201,17 +186,12 @@ export default function DetectionEditor(p: Props) {
       return request.isCurrent() && signature(object) === signature(original);
     };
     try {
-      const result = await api<GeometryResult & { image_id: number }>(
-        "/infer/points",
-        "POST",
-        {
-          image_id: imageId,
-          revision: p.workspace.get(imageId)?.revision || 0,
-          part: { id: original.id, points: [], box: xyxy(bbox) },
-        },
-        request.controller.signal,
-      );
-      if (!stillMatches() || result.image_id !== imageId) return;
+      const result = await request.points({
+        id: original.id,
+        points: [],
+        box: xyxy(bbox),
+      });
+      if (!result || !stillMatches()) return;
       const adjusted = maskBounds(result.mask);
       if (!adjusted)
         throw new Error(
@@ -230,8 +210,7 @@ export default function DetectionEditor(p: Props) {
         false,
       );
     } catch (e) {
-      if (stillMatches() && !(e instanceof Error && e.name === "AbortError"))
-        p.onError(errorText(e));
+      request.error(e, p.onError);
     } finally {
       request.finish();
     }
@@ -266,21 +245,12 @@ export default function DetectionEditor(p: Props) {
       request.isCurrent() &&
       signature(p.workspace.getDetection(imageId)?.draft) === captured;
     try {
-      const result = await api<GeometryResult & { image_id: number }>(
-        "/infer/points",
-        "POST",
-        {
-          image_id: imageId,
-          revision: p.workspace.get(imageId)?.revision || 0,
-          part: {
-            id: draft.id,
-            points: draft.points,
-            ...(draft.prompt_bbox ? { box: xyxy(draft.prompt_bbox) } : {}),
-          },
-        },
-        request.controller.signal,
-      );
-      if (!stillMatches() || result.image_id !== imageId) return;
+      const result = await request.points({
+        id: draft.id,
+        points: draft.points,
+        ...(draft.prompt_bbox ? { box: xyxy(draft.prompt_bbox) } : {}),
+      });
+      if (!result || !stillMatches()) return;
       const box = maskBounds(result.mask);
       if (!box)
         throw new Error(
@@ -292,19 +262,13 @@ export default function DetectionEditor(p: Props) {
         false,
       );
     } catch (e) {
-      if (stillMatches() && !(e instanceof Error && e.name === "AbortError"))
-        p.onError(errorText(e));
+      request.error(e, p.onError);
     } finally {
       request.finish();
     }
   }
   function cancelConceptSearches() {
-    for (const [key, request] of pending.current)
-      if (key.endsWith(":concept")) {
-        request.abort();
-        pending.current.delete(key);
-      }
-    render((v) => v + 1);
+    inference.cancel((request) => request.kind === "concept");
   }
   async function inferText() {
     if (
@@ -320,119 +284,60 @@ export default function DetectionEditor(p: Props) {
       original = signature(state.proposals),
       request = begin(id, "concept");
     try {
-      const result = await api<{ image_id: number; proposals: Proposal[] }>(
-        visual ? "/infer/visual" : "/infer/text",
-        "POST",
-        {
-          image_id: imageId,
-          revision: p.workspace.get(imageId)?.revision || 0,
-          text: text.trim(),
-          source_language: language,
-          category_id: category,
-          ...(visual
-            ? {
-                reference_image: visual.base64,
-                ...(visual.box ? { reference_box: visual.box } : {}),
-              }
-            : {}),
-        },
-        request.controller.signal,
-      );
+      const result = await request.concept(text, language, category, visual);
       if (
-        !request.isCurrent() ||
-        result.image_id !== imageId ||
+        !result ||
         signature(p.workspace.getDetection(imageId)?.proposals) !== original
       )
         return;
-      const proposals = result.proposals.flatMap((a) => {
-        const box = maskBounds(a.mask);
-        return box
-          ? [
-              {
-                id: uid(),
-                kind: "bbox" as const,
-                category_id: category,
-                bbox: box,
-                iscrowd: 0,
-                score: a.score,
-                selected: false,
-              },
-            ]
-          : [];
-      });
+      const proposals = proposalCandidates(
+        "detection",
+        result.proposals,
+        category,
+      );
       p.workspace.updateDetection(imageId, (s) => ({ ...s, proposals }));
       if (!proposals.length)
         p.onError("No boxes found. Try a different prompt.");
     } catch (e) {
-      if (
-        request.isCurrent() &&
-        !(e instanceof Error && e.name === "AbortError")
-      )
-        p.onError(errorText(e));
+      request.error(e, p.onError);
     } finally {
       request.finish();
     }
   }
   function acceptProposals() {
-    update((s) => ({
-      ...s,
-      annotations: [
-        ...s.annotations,
-        ...s.proposals
-          .filter((a) => a.selected)
-          .map(({ score: _score, selected: _selected, ...a }) => a),
-      ],
-      proposals: s.proposals.filter((a) => !a.selected),
-    }));
+    update((s) => {
+      const { accepted, remaining } = acceptCandidates(s.proposals, (p) => p);
+      return {
+        ...s,
+        annotations: [...s.annotations, ...accepted],
+        proposals: remaining,
+      };
+    });
     setSelected(null);
   }
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      const element = e.target as HTMLElement;
-      if (
-        !p.active ||
-        p.blocked ||
-        visualOpen ||
-        /INPUT|TEXTAREA|SELECT/.test(element.tagName) ||
-        element.isContentEditable
-      )
-        return;
-      const mod = e.ctrlKey || e.metaKey;
-      if (mod && ["z", "y"].includes(e.key.toLowerCase())) {
-        e.preventDefault();
-        if (id !== undefined)
-          p.workspace.historyDetection(
-            id,
-            e.key.toLowerCase() === "y" || e.shiftKey,
-          );
-        return;
+  useEditorShortcuts({
+    active: p.active,
+    blocked: p.blocked || visualOpen,
+    selected,
+    onHistory: (redo) => {
+      if (id !== undefined) {
+        inference.cancel((r) => r.imageId === id);
+        p.workspace.historyDetection(id, redo);
       }
-      if (mod || e.altKey) return;
-      if (e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        if (!e.repeat) void adjust();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        if (!e.repeat) confirm();
-      } else if (e.key.toLowerCase() === "b") {
-        setSelected(null);
-        setTool("box");
-      } else if (e.key.toLowerCase() === "v") setTool("select");
-      else if (e.key.toLowerCase() === "p") setTool("positive");
-      else if (e.key.toLowerCase() === "e" || e.key === "-")
-        setTool("negative");
-      else if (e.key.toLowerCase() === "f") fitRef.current?.();
-      else if (e.key === "Escape") {
-        setSelected(null);
-        setTool("select");
-      } else if (e.key === "Delete" || e.key === "Backspace") {
-        e.preventDefault();
-        remove();
-      } else if (e.key === "ArrowDown" && !selected) p.navigate(1);
-      else if (e.key === "ArrowUp" && !selected) p.navigate(-1);
-    };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
+    },
+    onConfirm: confirm,
+    onAdjust: () => void adjust(),
+    onDelete: remove,
+    onEscape: () => {
+      setSelected(null);
+      setTool("select");
+    },
+    onNavigate: p.navigate,
+    onFit: () => fitRef.current?.(),
+    onTool: (tool) => {
+      if (tool === "box") setSelected(null);
+      setTool(tool);
+    },
   });
   if (!p.active) return null;
   const draftBox: BoxAnnotation[] = state?.draft?.bbox
@@ -839,29 +744,14 @@ export default function DetectionEditor(p: Props) {
           </section>
         )}
         <div className="inspector-bottom">
-          <section className="classes-panel">
-            <div className="panel-label">
-              <span>Classes</span>
-              <IconButton
-                icon={Plus}
-                title="New class"
-                onClick={p.createClass}
-              />
-            </div>
-            <div className="category-chips">
-              {p.project.categories.map((c) => (
-                <button
-                  key={c.id}
-                  className={p.categoryId === c.id ? "active" : ""}
-                  onClick={() => p.setCategoryId(c.id)}
-                  onDoubleClick={() => p.editClass(c.id)}
-                >
-                  <i style={{ background: c.color }} />
-                  {c.name}
-                </button>
-              ))}
-            </div>
-          </section>
+          <ClassPanel
+            categories={p.project.categories}
+            categoryId={p.categoryId}
+            onSelect={p.setCategoryId}
+            onEdit={p.editClass}
+            onCreate={p.createClass}
+            createTitle="New class"
+          />
         </div>
       </aside>
     </>

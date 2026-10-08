@@ -331,14 +331,12 @@ def get_image(image_id: int, request: Request, thumbnail: bool = False):
 
 @app.get("/api/images/{image_id}/state")
 def get_state(image_id: int, request: Request):
-    store(request).require_client(request.headers.get("x-annotation-state-version"))
-    return store(request).get_state(image_id)
+    return store(request).get_state(image_id, client_version=request.headers.get("x-annotation-state-version"))
 
 
 @app.put("/api/images/{image_id}/state")
 def save_state(image_id: int, body: dict[str, Any], request: Request):
-    store(request).require_client(request.headers.get("x-annotation-state-version"))
-    return store(request).save_state(image_id, body)
+    return store(request).save_state(image_id, body, client_version=request.headers.get("x-annotation-state-version"))
 
 
 @app.post("/api/geometry")

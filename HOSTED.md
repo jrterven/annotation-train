@@ -237,22 +237,63 @@ metadata accounting. Export previews, ZIPs and unique COCO exports are temporary
 excluded from active-data quota, and use the existing private export lifecycle.
 ZIP uploads/downloads stream files; originals are processed one at a time.
 
-Deploy all CPU processes that read project stores (web and maintenance, and the
-compatible CPU service bundle) before exposing the v2 frontend. Retain the old
-frontend distribution during a rolling reader upgrade; do not route v2 writes
-to older web instances. Then activate the new frontend and require clients to
-reload. For installations that deploy frontend and backend together, drain writes
-and perform a coordinated CPU update instead. GPU workers and their existing
-point/text/visual request protocol do not change.
+YOLO preview/export first authorize the owner, settle any pending quota journal,
+and copy the project with SQLite's backup API while holding the existing global
+counter → project locks. The ready-image object keys and hashes are captured at
+the same boundary. The transaction commits before the immutable copy is checked
+against the preview token. No PostgreSQL transaction or live project handle is
+held during polygon conversion, original downloads, PNG conversion, ZIP creation
+or R2 upload. Validation, upload or cancellation failures cannot roll back an
+already settled quota journal. Exports do not reserve or change active-data quota.
 
-Test backup/restore against disposable mixed projects and record the backup
-before activation. Reverting an image alone cannot downgrade a v2 project. To
-return to a v1 application, restore its compatible coordinated PostgreSQL,
-SQLite and object-manifest backup; preserve newer data separately first.
+The archive represents the confirmed generation captured at export admission;
+edits made afterward belong to later exports. A change between preview and that
+capture returns 409. Project revocation during upload discards the output, and
+downloads recheck access. Local snapshots are removed on success or failure;
+failed object cleanup and process-crash artifacts remain private and are collected
+by the existing 24-hour maintenance lifecycle.
+
+Use this order for the v2 rollout (there is no built-in feature flag that makes a
+mixed fleet safe):
+
+1. Record an immutable release and take a coordinated v1-compatible backup while
+   the old deployment is still authoritative. Verify restoration in an isolated
+   destination, including original-object availability.
+2. Stop and drain the old maintenance process and scheduled backup/reconciliation
+   runs. Upgrade **maintenance first** to the v2-compatible release. Verify it can
+   reconcile and back up existing v1 projects before any web process can write v2.
+   Leaving old maintenance running after activation can break recovery and backups.
+3. Pause write admission at ingress (including state PUT, COCO import and other
+   project mutations), drain in-flight web requests/exports and update **all web
+   instances**. Keep the new frontend unavailable until every web reader and
+   maintenance process is compatible. Merely hiding the new UI does not gate API
+   clients. If frontend/backend are bundled, use this coordinated pause; never
+   serve a mixed old/new web fleet once v2 writes are admitted.
+4. Check state reads and a disposable mixed-project save/export/backup/restore.
+   Activate the frontend, resume writes and require clients to reload. Retain the
+   pre-activation backup and record the exact web and maintenance versions.
+
+GPU workers and their existing point/text/visual protocol do not change. Other
+CPU components may keep their compatible immutable versions; any process that
+opens project SQLite files must support v2 before activation.
+
+Before any v2 save/import, rollback can restore the previous software only after
+verifying that every live project and pending mutation is still v1-compatible.
+After promotion, reverting an application image or changing the version marker
+does not downgrade a project. Pause writes and stop every process that accesses
+the destination, including web and maintenance; preserve newer data separately.
+Restore the compatible coordinated PostgreSQL, SQLite and object-manifest backup
+into empty destinations with the referenced original objects available. Verify
+restoration before switching traffic and restarting the matching old services.
+This recovery loses writes made after the backup unless migrated separately;
+there is no automatic reverse migration. Keeping a v2-compatible software release
+is the rollback option that preserves newly written mixed projects.
 
 State GET/PUT requests on migrated projects require
 `X-Annotation-State-Version: 2`; PUT additionally requires `schema_version: 2`.
-An incompatible client is rejected before persistence. A stale image revision
+Version validation and state loading use one SQLite read snapshot, so a first
+v2 save cannot slip between them. Writes validate the client under their write
+transaction. An incompatible client is rejected before persistence. A stale image revision
 continues to return 409. YOLO preview/export use POST under each owned project;
 export repeats preview validation and verifies its snapshot token. Downloads
 check ownership and return `private, no-store`. Export IDs are canonical UUIDs,

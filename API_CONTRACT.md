@@ -45,7 +45,12 @@ API local `/api`, un proyecto abierto por proceso. Errores HTTP `{detail: string
 
 En alojado estas rutas usan `/api/v1/projects/{project_id}` y conservan ownership,
 CSRF en POST/PUT y descargas privadas con la expiración vigente. La generación
-YOLO procesa una imagen a la vez bajo una instantánea SQLite consistente. La
+YOLO captura una copia SQLite consistente y las identidades de imágenes autorizadas
+después de recuperar escrituras pendientes. Libera los bloqueos PostgreSQL antes
+de validar/generar el ZIP o transferir objetos. La exportación representa esa
+generación aunque haya ediciones posteriores; una revisión distinta al capturar
+devuelve 409. La lectura de estado comprueba la versión dentro de la misma
+transacción SQLite que lee las anotaciones. La
 inferencia y el protocolo de workers no cambian: detección convierte `xywh` a
 `xyxy` para `/infer/points` y deriva la caja del RLE devuelto.
 

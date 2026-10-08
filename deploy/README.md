@@ -32,6 +32,17 @@ The maintenance container runs the coordinated backup and reconciliation CLI.
 All four application processes use the same PostgreSQL metadata and the same
 project volume. PostgreSQL and `pg_dump` use major version 15 together.
 
+For mixed annotation format v2, upgrade and verify **maintenance before web**.
+Pause project-write admission and drain web requests before replacing every web
+instance; expose the new editor only after all readers support v2. Old maintenance
+must not reconcile or back up promoted projects. The generic Compose commands
+above do not enforce this ordering or a write gate. Follow the explicit
+[v2 rollout and rollback procedure](../HOSTED.md#mixed-annotation-state-v2-rollout).
+After a v2 save/import, rolling back to old software requires a coordinated
+v1-compatible PostgreSQL/project/object backup restored into empty destinations,
+with all destination processes stopped. Retain newer data separately; reverting
+only a container or the SQLite version marker cannot reverse the migration.
+
 ## Interactive latency
 
 The dispatcher checks the queue and active results every 200 ms, independently

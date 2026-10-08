@@ -232,3 +232,65 @@ def test_v2_migration_recovers_once_with_quota(hosted, monkeypatch, failure):
     assert_accounted(settings, db)
     assert api.get(root + "/images/1/state", headers=headers).json() == recovered
     assert_accounted(settings, db)
+
+
+def test_legacy_state_read_and_first_v2_save_use_one_snapshot(client, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from app import main
+
+    client.post('/api/project/categories', json={'name': 'Object'})
+    store = main._store
+    original = store.get_state(1)
+    # WAL allows the writer to commit while the old reader is paused after its
+    # version check, making the vulnerable interleaving deterministic.
+    with store._connect() as connection:
+        connection.execute('PRAGMA journal_mode=WAL')
+    checked, resume = threading.Event(), threading.Event()
+    check = ProjectStore._require_client
+    def guarded(connection, version):
+        check(connection, version)
+        if version is None and not checked.is_set():
+            checked.set()
+            assert resume.wait(10)
+    monkeypatch.setattr(ProjectStore, '_require_client', staticmethod(guarded))
+    with ThreadPoolExecutor(1) as pool:
+        reading = pool.submit(client.get, '/api/images/1/state')
+        try:
+            assert checked.wait(10)
+            saved = store.save_state(1, {**original, 'schema_version': 2, 'annotations': [box()]})
+        finally:
+            resume.set()
+        response = reading.result(timeout=10)
+    assert response.status_code == 200
+    assert response.json() == original  # never a v1 version check with v2 boxes
+    assert client.get('/api/images/1/state').status_code == 422
+    assert client.get('/api/images/1/state', headers={'X-Annotation-State-Version': '2'}).json() == saved
+
+
+def test_failed_export_commits_recovery_and_cleans_temporary_files(hosted, monkeypatch):
+    settings, db, objects, _, clients = hosted
+    api = clients['alice']
+    project = project_and_image(api)
+    root = f"/api/v1/projects/{project['id']}"
+    options = {'task': 'detection', 'include_empty': True}
+    preview = api.post(root + '/yolo/preview', json=options).json()
+    with monkeypatch.context() as patch:
+        patch.setattr(quota, 'recover_project', lambda *a, **kw: (_ for _ in ()).throw(OSError('crash after reservation')))
+        assert api.post(root + '/categories', json={'name': 'New class'}).status_code == 503
+    # Snapshot mismatch is deliberately raised after recovering the accepted
+    # write. Its quota settlement must survive the rejected export response.
+    response = api.post(root + '/yolo/export', json={**options, 'snapshot': preview['snapshot']})
+    assert response.status_code == 409, response.text
+    assert_accounted(settings, db)
+    assert not list(settings.data_dir.glob('coco-*'))
+    preview = api.post(root + '/yolo/preview', json=options).json()
+    put = objects.put
+    def broken_upload(key, data, content_type=None):
+        put(key, data, content_type)
+        raise OSError('upload response lost')
+    monkeypatch.setattr(objects, 'put', broken_upload)
+    assert api.post(root + '/yolo/export', json={**options, 'snapshot': preview['snapshot']}).status_code == 503
+    assert not list(objects.list('exports/'))
+    assert not list(settings.data_dir.glob('coco-*'))
+    assert_accounted(settings, db)

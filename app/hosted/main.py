@@ -26,10 +26,10 @@ from starlette.concurrency import run_in_threadpool
 import httpx
 
 from app.geometry import decode_mask, fill_small_holes, mask_payload, rasterize_components, union_masks
-from app.storage import ProjectStore, RevisionConflict, _relative_file
+from app.storage import ProjectStore, RevisionConflict, _relative_file, DATABASE_NAME
 from app import yolo
 from . import auth, jobs, uploads
-from .quota import mutate_project, recover_project, recover_project_locked
+from .quota import mutate_project, recover_project, recover_project_locked, _snapshot
 from .config import Settings
 from .database import Database
 from .middleware import HostedMiddleware
@@ -384,16 +384,16 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             image_record(session, project_id, image_id)
             # The editor renders exact RLE masks itself. Encoding full-image
             # PNG previews here delays navigation and holds the quota lock.
-            store.require_client(request.headers.get("x-annotation-state-version"))
-            return store.get_state(image_id, include_previews=False)
+            return store.get_state(image_id, include_previews=False,
+                                   client_version=request.headers.get("x-annotation-state-version"))
 
     @app.put("/api/v1/projects/{project_id}/images/{image_id}/state")
     def save_state(project_id: str, image_id: int, body: dict[str, Any], request: Request):
         def save_staged(store, session, project):
             image = image_record(session, project_id, image_id)
             validate_mask_dimensions(body, image)
-            store.require_client(request.headers.get("x-annotation-state-version"))
-            return store.save_state(image_id, body, include_previews=False)
+            return store.save_state(image_id, body, include_previews=False,
+                                    client_version=request.headers.get("x-annotation-state-version"))
         return mutate_project(settings, db, objects, project_id, auth.user_for_request(request), save_staged)
 
     @app.post("/api/v1/projects/{project_id}/categories")
@@ -558,33 +558,57 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             return dto(session, project, store)
         return mutate_project(settings, db, objects, project_id, auth.user_for_request(request), import_staged)
 
+    def capture_export(request, project_id, directory):
+        # Settle quota journals and capture both databases under the existing
+        # lock order. Commit recovery before any validation/processing can fail.
+        with owned(request, project_id) as (session, project, store):
+            records = {im.image_id: (im.object_key, im.sha256)
+                       for im in session.scalars(select(ImageObject).where(
+                           ImageObject.project_id == project_id, ImageObject.status == "ready"))}
+            _snapshot(store.database, directory / DATABASE_NAME)
+        # No ORM objects, live SQLite handles or PostgreSQL locks escape.
+        return ProjectStore(directory), records
+
     @app.post("/api/v1/projects/{project_id}/yolo/preview")
     def preview_yolo(project_id: str, body: yolo.ExportOptions, request: Request):
-        with owned(request, project_id) as (session, project, store):
-            ready = set(session.scalars(select(ImageObject.image_id).where(
-                ImageObject.project_id == project_id, ImageObject.status == "ready")))
-            return yolo.prepare(store, body, ready)
+        with tempfile.TemporaryDirectory(dir=settings.data_dir, prefix="coco-") as temporary:
+            snapshot, records = capture_export(request, project_id, Path(temporary))
+            return yolo.prepare(snapshot, body, set(records))
 
     @app.post("/api/v1/projects/{project_id}/yolo/export")
     def export_yolo(project_id: str, body: yolo.ExportRequest, request: Request):
-        with owned(request, project_id) as (session, project, store):
-            records = {im.image_id: im for im in session.scalars(select(ImageObject).where(
-                ImageObject.project_id == project_id, ImageObject.status == "ready"))}
-            with tempfile.TemporaryDirectory(dir=settings.data_dir, prefix="coco-") as temporary:
-                def image_path(image_id):
-                    record = records[image_id]
-                    path = Path(temporary) / "source-image"
-                    path.write_bytes(cache.get(objects, record.object_key, record.sha256))
-                    return path
-                export_id, path = yolo.generate(store, body, Path(temporary), image_path, set(records))
+        user_id = auth.user_for_request(request)
+        with tempfile.TemporaryDirectory(dir=settings.data_dir, prefix="coco-") as temporary:
+            snapshot, records = capture_export(request, project_id, Path(temporary))
+            def image_path(image_id):
+                key, sha256 = records[image_id]
+                path = Path(temporary) / "source-image"
+                path.write_bytes(cache.get(objects, key, sha256))
+                return path
+            export_id, path = yolo.generate(snapshot, body, Path(temporary), image_path, set(records))
+            key = f"exports/{project_id}/{export_id}.zip"
+            try:
                 with path.open("rb") as stream:
-                    objects.put(f"exports/{project_id}/{export_id}.zip", stream, "application/zip")
+                    objects.put(key, stream, "application/zip")
+                # Revocation during a long export must not produce a usable link.
+                # Downloads check again. This read needs no quota/project lock.
+                with db.session() as session:
+                    if session.scalar(select(Project.id).where(Project.id == project_id,
+                            Project.user_id == user_id, Project.deleted_at.is_(None))) is None:
+                        raise HTTPException(404, "Project not found")
+            except Exception:
+                try:
+                    objects.delete(key)
+                except Exception:
+                    pass  # Private orphan exports still expire via maintenance.
+                raise
             return {"export_id": export_id, "file_name": f"annotations-{body.task}.zip"}
 
     @app.get("/api/v1/projects/{project_id}/yolo/download/{export_id}")
     def download_yolo(project_id: str, export_id: str, request: Request):
         with owned(request, project_id):
-            stream = objects.open_stream(f"exports/{project_id}/{yolo.export_identity(export_id)}.zip")
+            key = f"exports/{project_id}/{yolo.export_identity(export_id)}.zip"
+        stream = objects.open_stream(key)
         def chunks():
             try:
                 while chunk := stream.read(1024 * 1024):
