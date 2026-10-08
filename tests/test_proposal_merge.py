@@ -14,7 +14,8 @@ from test_hosted_backend import hosted, project_and_image  # noqa: F401
 
 @pytest.mark.parametrize("mode", ["local", "hosted"])
 def test_merge_proposals_exact_union_save_reopen_and_coco(request, tmp_path, mode):
-    fixture = json.loads((Path(__file__).parent / "fixtures/merge-proposals.json").read_text())
+    fixture_path = Path(__file__).parents[1] / "frontend/src/__tests__/fixtures/merge-proposals.json"
+    fixture = json.loads(fixture_path.read_text())
     if mode == "local":
         api = request.getfixturevalue("client")
         images = tmp_path / "merge-images"

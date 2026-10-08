@@ -12,7 +12,7 @@ import App from "../App";
 import { configureApi } from "../api";
 import { maskContains } from "../masks";
 import type { GeometryResult, ImageState, Project, Proposal } from "../types";
-import fixtures from "../../../tests/fixtures/merge-proposals.json";
+import fixtures from "./fixtures/merge-proposals.json";
 
 const geometry = fixtures as unknown as Record<
   "first" | "second" | "other" | "merged",
@@ -237,8 +237,11 @@ describe.each(["local", "hosted"] as const)("%s proposal merging", (mode) => {
       fireEvent.change(screen.getByRole("combobox", { name: "Active class" }), {
         target: { value: "2" },
       });
-      fireEvent.click(mergeButton());
-      await waitFor(() => expect(current().annotations).toHaveLength(2));
+      await act(async () => fireEvent.click(mergeButton()));
+      await waitFor(() => {
+        expect(current().annotations).toHaveLength(2);
+        expect(current().busy).toBe(false);
+      });
       const merged = current().annotations[1];
       expect(merged).toEqual({
         ...geometry.merged,
@@ -274,8 +277,8 @@ describe.each(["local", "hosted"] as const)("%s proposal merging", (mode) => {
       expect(
         fetchMock.mock.calls.filter(([path]) => path.includes("/infer/")),
       ).toHaveLength(1);
-      undo();
-      expect(current().annotations).toEqual([existing]);
+      await act(async () => undo());
+      await waitFor(() => expect(current().annotations).toEqual([existing]));
       expect(
         current()
           .proposals.filter((p) => p.selected)
