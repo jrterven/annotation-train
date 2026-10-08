@@ -53,7 +53,7 @@ jobs:
           POSTGRES_PASSWORD: disposable-ci-password
           POSTGRES_DB: annotation_ci
         options: >-
-          --health-cmd 'pg_isready -U annotation_ci -d annotation_ci'
+          --health-cmd "pg_isready -U annotation_ci -d annotation_ci"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       ANNOTATION_TEST_DATABASE_URL: postgresql+psycopg://annotation_ci:disposable-ci-password@postgres:5432/annotation_ci
