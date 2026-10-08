@@ -330,15 +330,15 @@ describe("small-hole cleanup", () => {
   });
 
   it("does not add history or replace editable geometry when no holes were filled", async () => {
-    fill = async () => ({
-      ...filledGeometry,
-      filled_holes: 0,
-      filled_pixels: 0,
-    });
+    const pending = deferred<FillResult>();
+    fill = () => pending.promise;
     await boot();
     changeClass(3);
     fireEvent.click(fillButton());
-    await waitFor(() => expect(current().busy).toBe(false));
+    await act(async () => {
+      pending.resolve({ ...filledGeometry, filled_holes: 0, filled_pixels: 0 });
+      await pending.promise;
+    });
     expect(selectedAnnotation()).toEqual({ ...target, category_id: 3 });
     undo();
     expect(current().annotations).toEqual([target, other]);

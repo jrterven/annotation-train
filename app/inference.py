@@ -17,7 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from .images import Image
 
 
 # Public Hugging Face repository revision, verified via /api/models/facebook/sam3.

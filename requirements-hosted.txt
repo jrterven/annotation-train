@@ -1,0 +1,13 @@
+# CPU server only. GPU workers install the separately pinned model requirements.
+fastapi==0.142.2
+uvicorn==0.54.0
+numpy==2.5.3
+Pillow==12.3.0
+shapely==2.1.2
+pycocotools==2.0.11
+SQLAlchemy==2.0.54
+psycopg[binary]==3.3.6
+Authlib==1.8.0
+httpx==0.28.1
+boto3==1.43.109
+python-multipart==0.0.32

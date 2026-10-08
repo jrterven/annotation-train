@@ -106,8 +106,128 @@ Automated checks cover invalid/corrupt/animated files, raw base64 and byte/pixel
 
 Evidence: `output/qa/visual-reference/report.json`, `review.json`, overlays and RLE manifests; `output/qa/visual-ui/verification.json`, saved states and exported COCO; screenshots under `output/playwright/visual-*.png`. The model report separates successful execution from failed quality controls. Reproduce with `scripts/benchmark_visual.py --help`; its inputs are user-provided images, not fixtures shipped in the repository. This new inference path was exercised on MPS; CPU/CUDA/WSL behavior has not been revalidated for it.
 
+## Hosted mode and ARM64 CUDA · October 7, 2026
+
+The separate hosted backend and frontend passed the existing Python suite plus
+new ownership, session/CSRF, signed OIDC token, storage failure, queue, worker,
+and maintenance tests: **263 Python tests and 65 frontend tests passed**, and the
+production frontend build passed. Six PostgreSQL checks are opt-in and skipped
+in the default Python command; all six passed separately against PostgreSQL 15.
+Those integration checks exercised simultaneous quota
+reservations, job admission/cancellation, parallel schema initialization, and
+a real `pg_dump`/`pg_restore` round trip coordinated with project SQLite snapshots.
+The backup race test waited behind an in-flight writer and recovered matching
+metadata and annotations. These tests use isolated storage and test credentials.
+Storage accounting includes thumbnails and canonical annotation/project data.
+Fault injection around journal reservation and atomic SQLite replacement verifies
+that accepted mutations recover once and rejected writes preserve the live state.
+
+Real SAM 3 weights ran on NVIDIA GB10 ARM64 with CUDA. After model
+warmup, the worker processed points, a box, a polygon seed, English text, Spanish text,
+and a visual reference, returning masks with the expected image dimensions.
+Individual requests on the synthetic 320 × 240 fixture took approximately
+0.2–0.7 seconds with the final pinned container. This is a runtime compatibility check, not an accuracy or
+production latency benchmark. Private machine names, network addresses, and
+credentials are intentionally excluded from this report.
+
+A real dispatcher integration recovered an accepted attempt after a dispatcher
+restart, rejected duplicate execution, and completed a job on the fallback while
+the primary was stopped. In a separate accepted-attempt failure, it waited for
+the original 120-second deadline plus five seconds before a successful second
+attempt, charging the logical request only once. Only isolated annotation
+services and disposable integration metadata were used for these checks.
+
+Chrome exercised project creation, reopening, class creation, a new manual
+polygon with the worker unavailable, confirmation, saving, and COCO download.
+The downloaded COCO contained the expected original filename, one class, and
+one annotation with a 240 × 320 RLE. Browser file selection was blocked by the
+test browser extension's file URL permission; that fixture image was uploaded
+through the authenticated API. Automated tests separately cover file/folder
+upload UI behavior and upload validation.
+
+The hosted editor now offers **Use polygon**, which rasterizes a closed polygon
+on CPU and permits confirmation without a GPU request or inference quota.
+The original local entry point and its existing behavior remain separate.
+
+An isolated localhost service using the unchanged hosted authentication router
+and PostgreSQL 15 completed real Google consent, authorization-code exchange,
+signed identity-token validation, logout, and a second login to the same account.
+Rejecting consent created no account or session. Expiring that session in the
+isolated database caused the browser to return to the signed-out state. Separate
+controlled checks covered invalid/expired state, replay rejection, and PKCE.
+Only basic identity scopes were configured; no credentials are stored in Git.
+
+The CPU Docker image built successfully on Linux x86-64. These checks do not
+establish production Google OAuth, R2 credential isolation, public HTTPS, or public
+DNS readiness; those require the actual external configuration and launch tests.
+
+## Real Cloudflare R2 and PostgreSQL restore · October 7, 2026
+
+Both environment-specific R2 credentials passed object write, read, list, and
+delete checks in their own bucket. Every cross-bucket read, write, and list
+attempt returned **HTTP 403 `AccessDenied`**. Unsigned object reads against the
+S3 endpoint were rejected with **HTTP 400 `InvalidArgument`**. The checks used
+unique disposable prefixes; no deployment objects or databases were modified.
+
+Authenticated application routes ran through FastAPI TestClient with real R2,
+PostgreSQL 15, and the deployed GPU worker. Upload, CPU polygon annotation,
+save/reopen, COCO export/import, revision conflicts, CSRF rejection, and owner
+isolation passed. One normal points request completed in one attempt, using one
+quota unit, on a synthetic 256 × 192 image; its observed 1.65-second elapsed time
+is a single integration sample, not a production latency benchmark. Test sessions
+were created only in disposable databases, without invoking Google OAuth.
+
+A coordinated PostgreSQL/SQLite backup was written to R2 and restored into an
+empty database and volume after deleting the source project. Original image
+bytes and saved annotation masks were recovered, and old sessions were
+invalidated. Corrupting a disposable backup artifact caused checksum rejection
+before any destination database mutation. With the maintenance clock advanced
+to six days, the deleted original remained protected by the retained manifest;
+at eight days, the expired backup and original were collected. All temporary
+R2 objects and test databases were removed after verification.
+
+These storage and API checks do not exercise browser Google consent, public
+DNS/TLS, or the separate R2 public-domain settings. Those launch checks are
+recorded independently when completed.
+
+## Public HTTPS annotation workflow · October 7, 2026
+
+The production Google OAuth app is published with an External audience; Google
+reports that the three basic identity scopes do not require verification.
+Branding approval remains pending domain ownership verification and Google's
+stated 24-hour propagation window.
+
+Chrome completed Google sign-in on the public HTTPS deployment with the
+authorized test account. In the real editor, Spanish `zanahorias` produced
+19 SAM 3 proposals. One was accepted and saved; reloading and reopening the
+project recovered that annotation and the 18 remaining proposals. COCO export
+downloaded a dataset containing seven images and one annotation.
+
+A read-only comparison decoded the downloaded COCO RLE and the annotation in
+the production project's SQLite database. Both masks were 224 × 224 with
+1,994 foreground pixels and **zero differing pixels**. The saved image revision
+contained one annotation and 18 proposals. The project and its images were
+retained for continued use.
+
+Automated browser file selection remained blocked by the browser extension's
+file URL permission. The test image was uploaded through the authenticated
+public HTTPS API, which returned HTTP 201. Its temporary test session was
+revoked while existing browser sessions remained valid. A subsequent read-only
+check confirmed exactly one copy of the fixture, valid original bytes in R2,
+and matching active-data quota accounting. This is not a completed browser
+file-picker test.
+
+Public edge checks confirmed HTTP-to-HTTPS redirection, HTTP 200 for the home
+and legal pages, and HTTP 401 with `private, no-store` for protected anonymous
+API requests. The OAuth flow cookie carried Secure, HttpOnly, and SameSite=Lax;
+PKCE S256, state, nonce, exact identity scopes, and the configured callback were
+present. Duplicate `nosniff` headers from the application and Nginx were corrected
+in the site and deployment template; Nginx validation and repeated public-header
+checks passed.
+
 ## Remaining validation
 
 Segmentation quality still needs evaluation on representative user images, along with prolonged annotation sessions. Translation should be reviewed for the intended domain and wording.
 
-Linux/CUDA and Windows/WSL are target platforms supported by the installer design; no physical-system tests were performed on those platforms during this session. A fresh installation of the updated translation dependencies has not been established by the earlier dependency-resolution report.
+ARM64 Linux/CUDA has now passed the hosted runtime checks above. Windows/WSL and
+the x86-64 GPU installer have not been physically revalidated in this phase.

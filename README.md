@@ -1,8 +1,20 @@
 # Annotation and Training
 
-A local web application for image instance segmentation with **SAM 3**. Annotate with text, visual examples (experimental), positive/negative clicks, boxes, or an approximate polygon; refine masks, edit vertices, and import/export COCO. The interface is in English. Images, prompts, and annotations are processed locally.
+A web application for image instance segmentation with **SAM 3**, with local and hosted execution modes sharing the same editor. Annotate with text, visual examples (experimental), positive/negative clicks, boxes, or an approximate polygon; refine masks, edit vertices, and import/export COCO. The interface is in English. In local mode, images, prompts, and annotations are processed on your machine.
 
 Built with React, TypeScript, React Konva, FastAPI, PyTorch, and SQLite.
+
+For changes to either mode, follow [CONTRIBUTING.md](CONTRIBUTING.md).
+Versioned publication and deployment are described in [RELEASING.md](RELEASING.md).
+
+## Hosted mode
+
+The separate hosted entry point adds Google sign-in, private browser-uploaded
+projects, Cloudflare R2 storage, PostgreSQL accounts and quotas, and a durable
+queue for remote SAM 3 workers. `run.py` still starts the original local app
+without Google, R2, or PostgreSQL. See [HOSTED.md](HOSTED.md) for configuration,
+deployment, backup/restore, and the release checks. Hosted mode does not add
+training or YOLO features.
 
 ## Screenshots
 
@@ -20,7 +32,7 @@ Small mask holes can be filled explicitly with an adjustable pixel-area threshol
 
 ## Install
 
-Requires **Python 3.12**, **Node.js 22.x (22.13 or later), 24.x, or 26+**, and npm. Target platforms are macOS Apple Silicon, Linux, and Windows through WSL. SAM 3 has been validated on an M4 Max using MPS and CPU; Linux/CUDA and WSL still require testing on those systems. See [VALIDATION.md](VALIDATION.md) for measured results and limitations.
+Requires **Python 3.12**, **Node.js 22.x (22.13 or later), 24.x, or 26+**, and npm. Target platforms are macOS Apple Silicon, Linux, and Windows through WSL. SAM 3 has been validated on an M4 Max using MPS and CPU, and the hosted worker on NVIDIA GB10 ARM64 Linux/CUDA. The x86-64 GPU installer and WSL still require physical testing. See [VALIDATION.md](VALIDATION.md) for measured results and limitations.
 
 ### 1. Install Python 3.12
 

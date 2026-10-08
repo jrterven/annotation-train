@@ -25,7 +25,8 @@ export function decodeCounts(encoded: string): number[] {
   }
   return counts;
 }
-const cache = new Map<string, string>();
+type Overlay = { url: string; x: number; y: number };
+const cache = new Map<string, Overlay>();
 export function maskContains(mask: Mask, x: number, y: number): boolean {
   const [h, w] = mask.size;
   x = Math.floor(x);
@@ -41,41 +42,83 @@ export function maskContains(mask: Mask, x: number, y: number): boolean {
   }
   return false;
 }
-export function maskURL(mask: Mask, color: string): string {
-  const key = `${color}:${mask.size.join(",")}:${mask.counts}`;
-  const hit = cache.get(key);
-  if (hit) return hit;
+// Keep every original pixel, but allocate only the occupied rectangle. A small
+// object on an orthophoto must not require a full-image RGBA canvas per mask.
+export function maskRaster(mask: Mask, color: string) {
   const [h, w] = mask.size;
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-  const data = ctx.createImageData(w, h);
+  if (![h, w, h * w].every(Number.isSafeInteger) || h <= 0 || w <= 0)
+    throw new Error("Invalid RLE dimensions");
+  const counts = decodeCounts(mask.counts);
+  let offset = 0,
+    left = w,
+    top = h,
+    right = -1,
+    bottom = -1;
+  for (let run = 0; run < counts.length; run++) {
+    const count = counts[run];
+    if (offset + count > w * h) throw new Error("Invalid RLE dimensions");
+    if (run % 2 && count) {
+      const firstX = Math.floor(offset / h),
+        lastX = Math.floor((offset + count - 1) / h);
+      left = Math.min(left, firstX);
+      right = Math.max(right, lastX);
+      top = Math.min(top, firstX === lastX ? offset % h : 0);
+      bottom = Math.max(
+        bottom,
+        firstX === lastX ? (offset + count - 1) % h : h - 1,
+      );
+    }
+    offset += count;
+  }
+  if (offset !== w * h) throw new Error("Incomplete RLE dimensions");
+  if (right < left)
+    return {
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+      pixels: new Uint8ClampedArray(4),
+    };
+  const width = right - left + 1,
+    height = bottom - top + 1;
+  const pixels = new Uint8ClampedArray(width * height * 4);
   const hex = color.replace("#", "");
   const rgb = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
-  let offset = 0;
-  let filled = false;
-  for (const count of decodeCounts(mask.counts)) {
-    if (offset + count > w * h) throw new Error("Invalid RLE dimensions");
-    if (filled) {
+  offset = 0;
+  for (let run = 0; run < counts.length; run++) {
+    const count = counts[run];
+    if (run % 2) {
       for (let i = offset; i < offset + count; i++) {
-        const x = Math.floor(i / h),
-          y = i % h;
-        const at = (y * w + x) * 4;
-        data.data[at] = rgb[0];
-        data.data[at + 1] = rgb[1];
-        data.data[at + 2] = rgb[2];
-        data.data[at + 3] = 255;
+        const x = Math.floor(i / h) - left,
+          y = (i % h) - top;
+        const at = (y * width + x) * 4;
+        pixels[at] = rgb[0];
+        pixels[at + 1] = rgb[1];
+        pixels[at + 2] = rgb[2];
+        pixels[at + 3] = 255;
       }
     }
     offset += count;
-    filled = !filled;
   }
-  if (offset !== w * h) throw new Error("Incomplete RLE dimensions");
-  ctx.putImageData(data, 0, 0);
-  const url = canvas.toDataURL();
-  cache.set(key, url);
+  return { x: left, y: top, width, height, pixels };
+}
+export function maskOverlay(mask: Mask, color: string): Overlay {
+  const key = `${color}:${mask.size.join(",")}:${mask.counts}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const raster = maskRaster(mask, color);
+  const canvas = document.createElement("canvas");
+  canvas.width = raster.width;
+  canvas.height = raster.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return { url: "", x: raster.x, y: raster.y };
+  ctx.putImageData(
+    new ImageData(raster.pixels, raster.width, raster.height),
+    0,
+    0,
+  );
+  const overlay = { url: canvas.toDataURL(), x: raster.x, y: raster.y };
+  cache.set(key, overlay);
   if (cache.size > 60) cache.delete(cache.keys().next().value!);
-  return url;
+  return overlay;
 }

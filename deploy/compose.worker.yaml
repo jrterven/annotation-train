@@ -1,0 +1,34 @@
+name: annotation-worker
+services:
+  worker:
+    image: annotation-worker:${ANNOTATION_RELEASE:-local}
+    build:
+      context: ..
+      dockerfile: Dockerfile.worker
+    init: true
+    restart: unless-stopped
+    user: "${ANNOTATION_WORKER_UID:?Set the host account UID}:${ANNOTATION_WORKER_GID:?Set the host account GID}"
+    # Preserve real peer IPs. The launcher binds only the configured Tailscale
+    # address and loopback; it never binds to a public/wildcard interface.
+    network_mode: host
+    env_file: ${ANNOTATION_WORKER_ENV_FILE:?Set an absolute private worker environment file}
+    environment:
+      ANNOTATION_WORKER_DATA_DIR: /var/lib/annotation-worker
+      HF_HUB_CACHE: /models
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      SAM3_DEVICE: cuda
+    volumes:
+      - ${ANNOTATION_WORKER_MODELS_DIR:?Set the private model cache directory}:/models:ro
+      - ${ANNOTATION_WORKER_STATE_DIR:?Set a directory owned by the worker UID}:/var/lib/annotation-worker
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ANNOTATION_WORKER_GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256

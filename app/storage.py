@@ -16,7 +16,7 @@ from typing import Any, Iterable
 import uuid
 
 import numpy as np
-from PIL import Image
+from .images import Image
 from pycocotools import mask as coco_mask
 
 from .geometry import (controls_for_components, decode_mask, encode_mask, mask_payload,
@@ -73,8 +73,6 @@ def _image_details(path: Path) -> dict:
         with Image.open(path) as image:
             width, height = image.size  # Deliberately do not apply EXIF transpose.
             image.verify()
-        if width * height > 150_000_000:
-            raise ValueError("The image exceeds the 150-megapixel limit.")
         digest = hashlib.sha256()
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -274,25 +272,29 @@ class ProjectStore:
                 raise ValueError(f"The image has changed since import: {row['file_name']}")
         return path
 
-    def get_state(self, image_id: int) -> dict:
+    def get_state(self, image_id: int, *, include_previews: bool = True) -> dict:
         with self._connect() as connection:
             state = json.loads(self._image_row(connection, image_id)["state"])
             colors = {row["id"]: json.loads(row["data"])["color"]
                       for row in connection.execute("SELECT * FROM categories")}
         # Previews are derived, never persisted as duplicate base64 data.
         for annotation in state["annotations"] + state["proposals"]:
-            mask = decode_mask(annotation["mask"])
-            annotation["preview"] = mask_preview(mask, colors[annotation["category_id"]])
+            if include_previews:
+                mask = decode_mask(annotation["mask"])
+                annotation["preview"] = mask_preview(mask, colors[annotation["category_id"]])
             if "controls" not in annotation:
-                annotation["controls"] = controls_for_components(annotation["components"], mask.shape[1], mask.shape[0])
+                height, width = annotation["mask"]["size"]
+                annotation["controls"] = controls_for_components(annotation["components"], width, height)
         if state["draft"]:
             color = colors[state["draft"]["category_id"]]
             for part in state["draft"]["parts"]:
                 if part.get("mask"):
-                    mask = decode_mask(part["mask"])
-                    part["preview"] = mask_preview(mask, color)
+                    if include_previews:
+                        mask = decode_mask(part["mask"])
+                        part["preview"] = mask_preview(mask, color)
                     if "controls" not in part:
-                        part["controls"] = controls_for_components(part["components"], mask.shape[1], mask.shape[0])
+                        height, width = part["mask"]["size"]
+                        part["controls"] = controls_for_components(part["components"], width, height)
         return state
 
     @staticmethod
@@ -421,7 +423,7 @@ class ProjectStore:
         _json(result)
         return result
 
-    def save_state(self, image_id: int, state: dict) -> dict:
+    def save_state(self, image_id: int, state: dict, *, include_previews: bool = True) -> dict:
         if not isinstance(state, dict):
             raise ValueError("The state must be a JSON object.")
         with self._connect() as connection:
@@ -440,7 +442,7 @@ class ProjectStore:
                     connection.execute("INSERT INTO coco_ids VALUES(?,?,?)", (annotation["id"], coco_id, image_id))
             clean["revision"] += 1
             connection.execute("UPDATE images SET revision=?,state=? WHERE id=?", (clean["revision"], _json(clean), image_id))
-        return self.get_state(image_id)
+        return self.get_state(image_id, include_previews=include_previews)
 
     def relink(self, image_root: str | Path) -> dict:
         root = _root_path(self.directory, image_root)

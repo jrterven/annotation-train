@@ -68,6 +68,26 @@ def test_state_roundtrip_revision_conflict_and_no_base64_storage(project):
         assert "base64" not in connection.execute("SELECT state FROM images WHERE id=1").fetchone()[0]
 
 
+def test_compact_state_preserves_masks_controls_draft_and_proposals(project, monkeypatch):
+    state = project.get_state(1)
+    item = annotation()
+    state["annotations"] = [item]
+    state["proposals"] = [{**annotation(), "score": .9, "selected": False}]
+    state["draft"] = {"id": "draft", "category_id": 1, "active_part_id": "part",
+                      "parts": [{"id": "part", "mask": item["mask"], "components": item["components"]}]}
+    saved = project.save_state(1, state)
+    expected = copy.deepcopy(saved)
+    for record in expected["annotations"] + expected["proposals"] + expected["draft"]["parts"]:
+        record.pop("preview", None)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Compact reads must not decode or render full-image masks")
+
+    monkeypatch.setattr("app.storage.decode_mask", unexpected)
+    monkeypatch.setattr("app.storage.mask_preview", unexpected)
+    assert project.get_state(1, include_previews=False) == expected
+
+
 def test_invalid_update_is_atomic(project):
     before = project.get_state(1)
     invalid = copy.deepcopy(before)

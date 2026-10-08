@@ -1,0 +1,72 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Unused release version, for example v0.2.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Only release an exact main commit with a valid version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  checks:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+  candidate:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm --prefix frontend ci
+      - run: npm --prefix frontend run build
+      - name: Package only tracked source and compiled frontend
+        run: |
+          mkdir -p output/release
+          git archive --format=tar.gz --prefix="annotation-$VERSION/" --output="output/release/annotation-$VERSION-source.tar.gz" "$GITHUB_SHA"
+          tar -czf "output/release/annotation-$VERSION-frontend.tar.gz" -C frontend/dist .
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('output/release/release.json').write_text(json.dumps({
+              'version': os.environ['VERSION'], 'source_commit': os.environ['GITHUB_SHA'],
+              'gpu_validation': 'Record applicable real-model checks privately before publication',
+              'deployment': 'Separate, deliberate operation; see RELEASING.md'
+          }, indent=2) + '\n')
+          PY
+          cd output/release
+          sha256sum ./*.tar.gz release.json > SHA256SUMS
+      - name: Create immutable tag and draft release
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$VERSION" -f "sha=$GITHUB_SHA" --silent
+          gh release create "$VERSION" output/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Annotation $VERSION" --generate-notes

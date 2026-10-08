@@ -136,6 +136,7 @@ let inference: (body: {
   part: Part;
 }) => Promise<GeometryResult & { image_id: number; revision: number }>;
 let lastPrediction: GeometryResult;
+let modelState: string;
 let textInference: (body: {
   image_id: number;
   revision: number;
@@ -170,6 +171,26 @@ async function boot() {
   await screen.findByTestId("canvas");
   return view;
 }
+async function bootHosted() {
+  modelState = "unavailable";
+  const view = render(
+    <App
+      hostedSession={{
+        user: { id: "owner", name: "Owner", email: "owner@example.test" },
+        csrf_token: "csrf",
+        usage: null,
+      }}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Open Polygon experiment" }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Your projects" })).toBeNull(),
+  );
+  await screen.findByTestId("canvas");
+  return view;
+}
 function polygon(points = vertices, closed = false) {
   act(() => current().onPolygon(structuredClone(points), closed));
 }
@@ -201,6 +222,7 @@ beforeEach(() => {
     [2, blank(2)],
   ]);
   lastPrediction = prediction;
+  modelState = "ready";
   textInference = async (body) => ({
     image_id: body.image_id,
     revision: body.revision,
@@ -232,7 +254,12 @@ beforeEach(() => {
     body?: unknown,
   ) => {
     if (path === "/project") return structuredClone(project);
-    if (path === "/health") return { model: { state: "ready", device: "mps" } };
+    if (path === "/health")
+      return { model: { state: modelState, device: "mps" } };
+    if (path === "/projects")
+      return { projects: [{ id: "hosted-project", name: project.name }] };
+    if (path === "/projects/hosted-project")
+      return { ...structuredClone(project), id: "hosted-project" };
     const match = path.match(/^\/images\/(\d+)\/state$/);
     if (match) {
       const id = Number(match[1]);
@@ -264,6 +291,91 @@ afterEach(async () => {
 });
 
 describe("polygon to SAM application flow", () => {
+  it.each(["ready", "running"])(
+    "segments a new draft after discarding a %s draft with the trash button",
+    async (stage) => {
+      const confirmed = {
+        ...prediction,
+        id: "kept",
+        category_id: 1,
+        iscrowd: 0,
+      };
+      disk.get(1)!.annotations = [confirmed];
+      const first = deferred<
+        GeometryResult & { image_id: number; revision: number }
+      >();
+      const second = deferred<
+        GeometryResult & { image_id: number; revision: number }
+      >();
+      let count = 0;
+      inference = () => (++count === 1 ? first.promise : second.promise);
+      await bootHosted();
+      act(() => current().onPoint([3, 3], false));
+      const oldDraft = current().draft!;
+      const oldSignal = calls("/infer/points")[0][3];
+      if (stage === "ready") {
+        await act(async () =>
+          first.resolve({ ...prediction, image_id: 1, revision: 0 }),
+        );
+        expect(activePart()?.mask).toEqual(prediction.mask);
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+      expect(current().draft).toBeNull();
+      if (stage === "running") expect(oldSignal?.aborted).toBe(true);
+      // Autosave can advance the annotation revision while a new prompt runs.
+      await save();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Positive point · P" }),
+      );
+      act(() => current().onPoint([2, 3], false));
+      expect(current().draft?.id).not.toBe(oldDraft.id);
+      expect(activePart()?.id).not.toBe(oldDraft.active_part_id);
+      await save();
+      if (stage === "running") {
+        await act(async () =>
+          first.resolve({ ...prediction, image_id: 1, revision: 0 }),
+        );
+        expect(activePart()?.mask).toBeUndefined();
+      }
+      const { preview: _preview, ...withoutPreview } = corrected;
+      await act(async () =>
+        second.resolve({ ...withoutPreview, image_id: 1, revision: 1 }),
+      );
+      expect(activePart()?.mask).toEqual(corrected.mask);
+      expect(activePart()?.points).toEqual([{ x: 2, y: 3, label: 1 }]);
+      expect(
+        (screen.getByRole("button", { name: "Confirm ↵" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      expect(current().annotations).toEqual([confirmed]);
+    },
+  );
+
+  it("keeps a segmentation failure visible and clears it when the part is retried", async () => {
+    inference = async () => {
+      throw new ApiError(503, "SAM unavailable");
+    };
+    await bootHosted();
+    act(() => current().onPoint([3, 3], false));
+    await screen.findByRole("button", { name: /Part 1.*Failed/ });
+    expect(screen.getByRole("alert").textContent).toContain("SAM unavailable");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Dismiss notification" }),
+    );
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Retry segmentation",
+    );
+    inference = async (body) => ({
+      ...prediction,
+      image_id: body.image_id,
+      revision: body.revision,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry segmentation" }));
+    await waitFor(() => expect(activePart()?.mask).toEqual(prediction.mask));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: /Part 1.*Ready/ })).toBeTruthy();
+  });
+
   it("only infers on request, preserves the polygon seed through corrections, and confirms the final mask", async () => {
     await boot();
     fireEvent.keyDown(document.body, { key: "g" });
@@ -361,7 +473,9 @@ describe("polygon to SAM application flow", () => {
     fireEvent.click(
       screen.getAllByRole("button", { name: /^Refine with SAM$/ })[0],
     );
-    await screen.findByText(/The polygon intersects itself/);
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "The polygon intersects itself",
+    );
     expect(activePart()?.polygon).toEqual({ vertices: crossing, closed: true });
     expect(activePart()?.seed_mask).toBeUndefined();
     expect(activePart()?.mask).toBeUndefined();
@@ -520,9 +634,77 @@ describe("annotation toolbar", () => {
       screen.getByRole("textbox", { name: "Object to segment" }),
       { target: { value: "zanahorias" } },
     );
-    fireEvent.submit(screen.getByRole("form", { name: "Concept segmentation" }));
+    fireEvent.submit(
+      screen.getByRole("form", { name: "Concept segmentation" }),
+    );
     await screen.findByText(
       "No objects found for “carrots”. Try a different description.",
     );
+  });
+});
+
+describe("hosted manual polygons without a GPU", () => {
+  it("rasterizes, confirms, saves and reopens a polygon without any inference request", async () => {
+    const view = await bootHosted();
+    polygon(vertices, true);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Refine with SAM",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
+    await waitFor(() => expect(activePart()?.mask).toEqual(seed.mask));
+    expect(activePart()?.seed_mask).toEqual(seed.mask);
+    expect(calls("/geometry")[0][2]).toEqual({
+      image_id: 1,
+      components: [{ outer: vertices, holes: [] }],
+    });
+    lastPrediction = seed;
+    fireEvent.click(screen.getByRole("button", { name: /Confirm/ }));
+    await waitFor(() => expect(current().annotations).toHaveLength(1));
+    expect(current().annotations[0].mask).toEqual(seed.mask);
+    expect(current().draft).toBeNull();
+    expect(calls("/masks/union")[0][2]).toEqual({
+      image_id: 1,
+      masks: [seed.mask],
+    });
+    expect(
+      request.mock.calls.some(([path]) => path.startsWith("/infer/")),
+    ).toBe(false);
+    await save();
+    view.unmount();
+    await bootHosted();
+    expect(current().annotations[0].mask).toEqual(seed.mask);
+    expect(current().draft).toBeNull();
+  });
+
+  it("preserves an invalid polygon for correction and ignores a discarded CPU result", async () => {
+    await bootHosted();
+    polygon(vertices, true);
+    geometry = async () => {
+      throw new ApiError(422, "The polygon intersects itself.");
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
+    await screen.findByText("The polygon intersects itself.");
+    expect(activePart()?.polygon).toEqual({ vertices, closed: true });
+    expect(activePart()?.mask).toBeUndefined();
+    expect(
+      (screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    const pending = deferred<GeometryResult>();
+    geometry = () => pending.promise;
+    fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    await act(async () => {
+      pending.resolve(seed);
+    });
+    expect(current().draft).toBeNull();
+    expect(current().annotations).toHaveLength(0);
+    expect(
+      request.mock.calls.some(([path]) => path.startsWith("/infer/")),
+    ).toBe(false);
   });
 });
