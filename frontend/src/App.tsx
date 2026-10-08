@@ -20,6 +20,7 @@ import {
   Layers3,
   LoaderCircle,
   Minus,
+  Merge,
   MousePointer2,
   PanelRightClose,
   PanelRightOpen,
@@ -184,6 +185,7 @@ export default function App({
   const [conflictImage, setConflictImage] = useState<number | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [geometryBusy, setGeometryBusy] = useState(false);
+  const [mergingProposals, setMergingProposals] = useState(false);
   const [maxHoleArea, setMaxHoleArea] = useState("16");
   const [workVersion, setWorkVersion] = useState(0);
   const pending = useRef(new Map<string, Pending>());
@@ -275,6 +277,7 @@ export default function App({
   }, [hosted]);
   useEffect(
     () => () => {
+      geometryToken.current = "";
       for (const request of pending.current.values())
         request.controller.abort();
     },
@@ -809,6 +812,7 @@ export default function App({
     if (
       imageId === null ||
       !state ||
+      mergingProposals ||
       (!text.trim() && !visualExample) ||
       !categoryRequired()
     )
@@ -891,7 +895,13 @@ export default function App({
     }
   }
   function acceptProposals() {
-    if (!categoryRequired() || !selectedProposals.length) return;
+    if (
+      geometryBusy ||
+      confirming ||
+      !categoryRequired() ||
+      !selectedProposals.length
+    )
+      return;
     update((s) => ({
       ...s,
       annotations: [
@@ -908,7 +918,70 @@ export default function App({
     }));
     setTool("select");
   }
+  async function mergeProposals() {
+    if (
+      imageId === null ||
+      !state ||
+      selectedProposals.length < 2 ||
+      geometryBusy ||
+      confirming ||
+      textBusy ||
+      !categoryRequired()
+    )
+      return;
+    const image = imageId,
+      session = sessionToken.current,
+      token = uid(),
+      sourceEntry = workspace.entry(image),
+      proposalsSnapshot = JSON.stringify(state.proposals),
+      selectedIds = new Set(selectedProposals.map((p) => p.id)),
+      category = categoryId;
+    geometryToken.current = token;
+    setGeometryBusy(true);
+    setMergingProposals(true);
+    try {
+      const result = await api<GeometryResult>("/masks/union", "POST", {
+        image_id: image,
+        masks: selectedProposals.map((p) => p.mask),
+      });
+      if (
+        geometryToken.current !== token ||
+        sessionToken.current !== session ||
+        workspace.entry(image) !== sourceEntry
+      )
+        return;
+      if (JSON.stringify(workspace.get(image)?.proposals) !== proposalsSnapshot) {
+        setToast("Proposals changed. Select them again to merge.");
+        return;
+      }
+      const annotation: Annotation = {
+        ...result,
+        id: uid(),
+        category_id: category,
+        iscrowd: 0,
+      };
+      // One history entry consumes only the selected proposals. Keep any draft
+      // and unrelated annotations, including inference completed in the meantime.
+      workspace.update(image, (s) => ({
+        ...s,
+        annotations: [...s.annotations, annotation],
+        proposals: s.proposals.filter((p) => !selectedIds.has(p.id)),
+      }));
+      if (activeImage.current === image) {
+        setSelected(annotation.id);
+        setVertex(null);
+        setTool("select");
+      }
+    } catch (e) {
+      if (geometryToken.current === token && sessionToken.current === session)
+        setToast(errorText(e));
+    } finally {
+      if (geometryToken.current === token) setGeometryBusy(false);
+      setMergingProposals(false);
+    }
+  }
   function refineProposal(proposal: Proposal) {
+    if (geometryBusy || confirming) return;
     if (state?.draft) {
       setToast(
         "Confirm or discard the current draft before refining another proposal.",
@@ -1674,7 +1747,11 @@ export default function App({
                     />
                     <button
                       type="submit"
-                      disabled={(!text.trim() && !visualExample) || textBusy}
+                      disabled={
+                        (!text.trim() && !visualExample) ||
+                        textBusy ||
+                        mergingProposals
+                      }
                       title="Generate proposals with SAM 3"
                       aria-label="Generate proposals with SAM 3"
                     >
@@ -2002,6 +2079,7 @@ export default function App({
                       <IconButton
                         icon={X}
                         title="Discard proposals"
+                        disabled={geometryBusy || confirming}
                         onClick={() => update((s) => ({ ...s, proposals: [] }))}
                       />
                     </div>
@@ -2020,6 +2098,7 @@ export default function App({
                     <div className="proposal-actions">
                       <button
                         className="text-button"
+                        disabled={geometryBusy || confirming}
                         onClick={() =>
                           update(
                             (s) => ({
@@ -2048,6 +2127,7 @@ export default function App({
                           className="proposal-checkbox"
                           aria-label={`Select proposal ${i + 1}`}
                           aria-pressed={proposal.selected}
+                          disabled={geometryBusy || confirming}
                           onClick={() =>
                             update(
                               (s) => ({
@@ -2072,6 +2152,7 @@ export default function App({
                           className="text-button"
                           onClick={() => refineProposal(proposal)}
                           title="Refine with clicks"
+                          disabled={geometryBusy || confirming}
                         >
                           Refine
                         </button>
@@ -2079,10 +2160,30 @@ export default function App({
                     ))}
                     <button
                       className="button primary full compact"
-                      disabled={!selectedProposals.length}
+                      disabled={
+                        !selectedProposals.length || geometryBusy || confirming
+                      }
                       onClick={acceptProposals}
                     >
                       <CheckCheck size={15} /> Accept selected
+                    </button>
+                    <button
+                      className="button secondary full compact"
+                      disabled={
+                        selectedProposals.length < 2 ||
+                        geometryBusy ||
+                        confirming ||
+                        textBusy
+                      }
+                      onClick={() => void mergeProposals()}
+                      title="Combine selected proposals into one instance using the active class"
+                    >
+                      {mergingProposals ? (
+                        <LoaderCircle size={15} className="spin" />
+                      ) : (
+                        <Merge size={15} />
+                      )}
+                      Merge selected
                     </button>
                   </section>
                 )}
