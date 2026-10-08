@@ -40,6 +40,7 @@ describe("hosted API boundary", () => {
         headers: {
           "X-CSRF-Token": "session-csrf",
           "Content-Type": "application/json",
+          "X-Annotation-State-Version": "2",
         },
         body: '{"revision":1}',
       }),

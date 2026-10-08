@@ -203,6 +203,8 @@ export async function api<T>(
     path === "/coco/import" ||
     (path === "/project" && method === "GET");
   const headers: Record<string, string> = {};
+  if (/\/images\/\d+\/state$/.test(path))
+    headers["X-Annotation-State-Version"] = "2";
   if (!hosted && !exempt && projectDirectory)
     headers["X-Project-Directory"] = encodeURIComponent(projectDirectory);
   const inference = hosted && method === "POST" && path.startsWith("/infer/");

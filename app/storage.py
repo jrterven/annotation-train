@@ -19,6 +19,7 @@ import numpy as np
 from .images import Image
 from pycocotools import mask as coco_mask
 
+from .annotations import box_record, bbox, detection_workspace
 from .geometry import (controls_for_components, decode_mask, encode_mask, mask_payload,
                        mask_preview, rasterize_components, validate_components)
 
@@ -161,8 +162,14 @@ class ProjectStore:
             raise ValueError("This folder does not contain a project.")
         with self._connect() as connection:
             version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if not version or version[0] != "1":
+            if not version or version[0] not in ("1", "2"):
                 raise ValueError("This project version is not supported.")
+
+    def require_client(self, version: str | None) -> None:
+        with self._connect() as connection:
+            current = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+        if current == "2" and version != "2":
+            raise ValueError("This project uses annotation format v2. Reload/update the editor before continuing.")
 
     def _connect(self):
         return _connection(self.database)
@@ -250,7 +257,9 @@ class ProjectStore:
             name = connection.execute("SELECT value FROM meta WHERE key='name'").fetchone()[0]
             categories = [json.loads(row[0]) for row in connection.execute("SELECT data FROM categories ORDER BY id")]
             images = [{"id": row["id"], "file_name": row["file_name"], "width": row["width"],
-                       "height": row["height"], "annotation_count": len(json.loads(row["state"])["annotations"])}
+                       "height": row["height"], "annotation_count": len(json.loads(row["state"])["annotations"]),
+                       "annotation_counts": {task: sum((a.get("kind") == "bbox") == (task == "detection")
+                          for a in json.loads(row["state"])["annotations"]) for task in ("segmentation", "detection")}}
                       for row in connection.execute("SELECT * FROM images ORDER BY file_name COLLATE NOCASE,id")]
             return {"name": name, "directory": str(self.directory), "image_root": str(self._root(connection)),
                     "categories": categories, "images": images}
@@ -279,6 +288,8 @@ class ProjectStore:
                       for row in connection.execute("SELECT * FROM categories")}
         # Previews are derived, never persisted as duplicate base64 data.
         for annotation in state["annotations"] + state["proposals"]:
+            if annotation.get("kind") == "bbox":
+                continue
             if include_previews:
                 mask = decode_mask(annotation["mask"])
                 annotation["preview"] = mask_preview(mask, colors[annotation["category_id"]])
@@ -328,6 +339,15 @@ class ProjectStore:
         if type(state.get("revision")) is not int or state["revision"] < 0:
             raise ValueError("The state revision is invalid.")
         result = {"image_id": row["id"], "revision": state["revision"], "draft": None}
+        if not isinstance(state.get("annotations", []), list):
+            raise ValueError("annotations must be a list.")
+        version = state.get("schema_version", 1)
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError("Unsupported annotation state version.")
+        if version == 1 and ("detection" in state or any(a.get("kind") == "bbox" for a in (state.get("annotations") or []) if isinstance(a, dict))):
+            raise ValueError("Boxes require annotation state version 2.")
+        if version == 2:
+            result["schema_version"] = 2
         identities = set()
         width, height = row["width"], row["height"]
 
@@ -349,7 +369,11 @@ class ProjectStore:
             for annotation in state.get(collection, []):
                 identity(annotation)
                 category(annotation)
-                clean = self._mask_record(annotation, width, height)
+                kind = annotation.get("kind", "segmentation")
+                if kind not in ("segmentation", "bbox") or (collection == "proposals" and kind != "segmentation"):
+                    raise ValueError("Invalid annotation kind.")
+                clean = (box_record(annotation, width, height) if kind == "bbox"
+                         else self._mask_record(annotation, width, height))
                 if type(clean.get("iscrowd", 0)) is not int or clean.get("iscrowd", 0) not in (0, 1):
                     raise ValueError("iscrowd must be 0 or 1.")
                 clean["iscrowd"] = clean.get("iscrowd", 0)
@@ -420,6 +444,9 @@ class ProjectStore:
             if clean.get("active_part_id") not in part_ids:
                 raise ValueError("The active part does not exist in the draft.")
             result["draft"] = clean
+        if version == 2:
+            result["detection"] = detection_workspace(state.get("detection", {}), width, height,
+                                                        identity, category, result["annotations"])
         _json(result)
         return result
 
@@ -431,6 +458,9 @@ class ProjectStore:
             row = self._image_row(connection, image_id)
             if state.get("revision") != row["revision"]:
                 raise RevisionConflict("The image has newer changes. Reload its state before saving.")
+            schema = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+            if schema == "2" and state.get("schema_version") != 2:
+                raise ValueError("This project uses annotation format v2. Reload/update the editor before saving.")
             category_ids = {item[0] for item in connection.execute("SELECT id FROM categories")}
             clean = self._validate_state(state, row, category_ids)
             for annotation in clean["annotations"] + clean["proposals"]:
@@ -440,6 +470,8 @@ class ProjectStore:
                 if not found:
                     coco_id = connection.execute("SELECT COALESCE(MAX(coco_id),0)+1 FROM coco_ids").fetchone()[0]
                     connection.execute("INSERT INTO coco_ids VALUES(?,?,?)", (annotation["id"], coco_id, image_id))
+            if clean.get("schema_version") == 2:
+                connection.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
             clean["revision"] += 1
             connection.execute("UPDATE images SET revision=?,state=? WHERE id=?", (clean["revision"], _json(clean), image_id))
         return self.get_state(image_id, include_previews=include_previews)
@@ -551,6 +583,17 @@ class ProjectStore:
             _, details, state = image_records[image_id]
             height, width = details["height"], details["width"]
             segmentation = annotation.get("segmentation")
+            if segmentation is None or segmentation == []:
+                try:
+                    box = bbox(annotation.get("bbox"), width, height)
+                except ValueError as error:
+                    raise ValueError(f"Annotation {coco_id}: {error}") from error
+                identity = str(uuid.uuid4())
+                state["annotations"].append({"id": identity, "kind": "bbox", "category_id": category_id,
+                                             "iscrowd": crowd, "bbox": box})
+                state["schema_version"] = 2
+                source_annotations.append((identity, coco_id, image_id, annotation, None))
+                continue
             try:
                 if isinstance(segmentation, dict):
                     mask = decode_mask(segmentation)
@@ -583,6 +626,8 @@ class ProjectStore:
                 connection.execute("UPDATE meta SET value=? WHERE key='coco_metadata'", (_json(metadata),))
                 for category in category_records:
                     connection.execute("INSERT INTO categories VALUES(?,?)", (category["id"], _json(category)))
+                if any(state.get("schema_version") == 2 for _, _, state in image_records.values()):
+                    connection.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
                 for image_id, (name, details, state) in image_records.items():
                     _insert_image(connection, image_id, name, details, images[image_id], state)
                 for identity, coco_id, image_id, annotation, mask in source_annotations:
@@ -595,7 +640,9 @@ class ProjectStore:
                 os.unlink(temporary)
         return cls(destination)
 
-    def export_coco(self) -> Path:
+    def export_coco(self, task: str = "all", *, unique: bool = False) -> Path:
+        if task not in ("all", "segmentation", "detection"):
+            raise ValueError("Invalid export task.")
         with self._connect() as connection:
             connection.execute("BEGIN")
             output = json.loads(connection.execute("SELECT value FROM meta WHERE key='coco_metadata'").fetchone()[0])
@@ -609,9 +656,19 @@ class ProjectStore:
                 image.update({"id": row["id"], "file_name": row["file_name"], "width": row["width"], "height": row["height"]})
                 output["images"].append(image)
                 for annotation in json.loads(row["state"])["annotations"]:
+                    is_box = annotation.get("kind") == "bbox"
+                    if task != "all" and is_box != (task == "detection"):
+                        continue
                     identity = connection.execute("SELECT coco_id FROM coco_ids WHERE internal_id=?", (annotation["id"],)).fetchone()[0]
                     original = connection.execute("SELECT * FROM annotation_sources WHERE internal_id=?", (annotation["id"],)).fetchone()
                     record = json.loads(original["record"]) if original else {}
+                    if is_box:
+                        record.pop("segmentation", None)
+                        record.update({"id": identity, "image_id": row["id"], "category_id": annotation["category_id"],
+                                       "iscrowd": annotation.get("iscrowd", 0), "bbox": annotation["bbox"],
+                                       "area": annotation["bbox"][2] * annotation["bbox"][3]})
+                        output["annotations"].append(record)
+                        continue
                     mask = annotation["mask"]
                     record.update({"id": identity, "image_id": row["id"], "category_id": annotation["category_id"],
                                    "iscrowd": annotation.get("iscrowd", 0), "segmentation": mask})
@@ -620,6 +677,7 @@ class ProjectStore:
                     record["bbox"] = [float(number) for number in coco_mask.toBbox(rle)]
                     output["annotations"].append(record)
             output["annotations"].sort(key=lambda annotation: annotation["id"])
-        destination = self.directory / "anotaciones.coco.json"
+        destination = self.directory / "exports" / f"{uuid.uuid4()}.json" if unique else self.directory / "anotaciones.coco.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
         _atomic_text(destination, json.dumps(output, ensure_ascii=False, allow_nan=False, indent=2))
         return destination

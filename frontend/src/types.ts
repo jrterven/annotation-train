@@ -13,6 +13,7 @@ export type SourceImage = {
   width: number;
   height: number;
   annotation_count: number;
+  annotation_counts?: Record<Task, number>;
 };
 export type Project = {
   id?: string;
@@ -35,7 +36,8 @@ export type HostedSession = {
     inference_limit: number;
   } | null;
 };
-export type Annotation = {
+export type SegmentationAnnotation = {
+  kind?: "segmentation";
   id: string;
   category_id: number;
   mask: Mask;
@@ -62,11 +64,14 @@ export type Draft = {
   parts: Part[];
   active_part_id: string;
 };
-export type Proposal = Annotation & { score: number; selected: boolean };
+export type Proposal = SegmentationAnnotation & {
+  score: number;
+  selected: boolean;
+};
 export type ImageState = {
   image_id: number;
   revision: number;
-  annotations: Annotation[];
+  annotations: SegmentationAnnotation[];
   draft: Draft | null;
   proposals: Proposal[];
 };
@@ -79,3 +84,34 @@ export type GeometryResult = {
 export type ModelStatus = { state: string; device?: string; message?: string };
 export type Tool =
   "select" | "pan" | "positive" | "negative" | "box" | "polygon";
+
+export type Task = "segmentation" | "detection";
+export type BBox = [number, number, number, number]; // x, y, width, height, original pixels
+export type BoxAnnotation = {
+  kind: "bbox";
+  id: string;
+  category_id: number;
+  iscrowd: number;
+  bbox: BBox;
+};
+export type Annotation = SegmentationAnnotation | BoxAnnotation;
+export type BoxProposal = BoxAnnotation & { score: number; selected: boolean };
+export type BoxDraft = {
+  id: string;
+  category_id: number;
+  bbox?: BBox;
+  prompt_bbox?: BBox;
+  points: Point[];
+};
+export type BoxAdjustment = { target_id: string; base_bbox: BBox; bbox: BBox };
+export type DetectionWork = {
+  draft: BoxDraft | null;
+  proposals: BoxProposal[];
+  adjustment: BoxAdjustment | null;
+};
+export type DetectionState = DetectionWork & { annotations: BoxAnnotation[] };
+export type ProjectImageState = Omit<ImageState, "annotations"> & {
+  schema_version?: 2;
+  annotations: Annotation[];
+  detection?: DetectionWork;
+};

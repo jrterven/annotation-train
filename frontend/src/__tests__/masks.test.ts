@@ -82,3 +82,14 @@ describe("COCO pixel masks", () => {
     ).toThrow();
   });
 });
+
+it("computes exact bounding boxes from RLE runs without allocating a raster", async () => {
+  const { maskBounds } = await import("../masks");
+  expect(maskBounds({ size: [5671, 5786], counts: "PTVj:1eWU_d0" })).toEqual([
+    2000, 2000, 1, 1,
+  ]);
+  expect(maskBounds({ size: [3, 4], counts: "11123O" })).toEqual([0, 0, 4, 3]);
+  expect(maskBounds({ size: [3, 3], counts: "0410" })).toEqual([0, 0, 3, 3]);
+  expect(maskBounds({ size: [4, 5], counts: "d0" })).toBeNull();
+  expect(() => maskBounds({ size: [1, 1], counts: "20" })).toThrow();
+});

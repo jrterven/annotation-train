@@ -220,3 +220,42 @@ backup/restore, and browser upload → annotate → save → reopen → COCO exp
 Verify unrelated workloads after GPU reassignment and inspect the commit and
 Docker build context for secrets. Publish the branch separately from `main`;
 add public DNS only after the live checks pass.
+
+## Mixed annotation state v2 rollout
+
+The shared project format now supports native bounding boxes alongside exact
+segmentation masks. SQL tables are unchanged: the version marker and image JSON
+are updated transactionally. Only an actual v2 save (or COCO import containing
+boxes) upgrades the project marker. Unedited image rows can still use v1 JSON;
+v2 readers normalize them without modifying the stored mask, IDs or revision.
+Box-only source records store JSON `null` in `annotation_sources.mask`.
+
+Hosted v2 writes and imports must go through `mutate_project`: staged SQLite
+generations, exact metadata quota deltas, journaling and recovery remain in use.
+The new `detection` workspace and mixed `annotations` are included in logical
+metadata accounting. Export previews, ZIPs and unique COCO exports are temporary,
+excluded from active-data quota, and use the existing private export lifecycle.
+ZIP uploads/downloads stream files; originals are processed one at a time.
+
+Deploy all CPU processes that read project stores (web and maintenance, and the
+compatible CPU service bundle) before exposing the v2 frontend. Retain the old
+frontend distribution during a rolling reader upgrade; do not route v2 writes
+to older web instances. Then activate the new frontend and require clients to
+reload. For installations that deploy frontend and backend together, drain writes
+and perform a coordinated CPU update instead. GPU workers and their existing
+point/text/visual request protocol do not change.
+
+Test backup/restore against disposable mixed projects and record the backup
+before activation. Reverting an image alone cannot downgrade a v2 project. To
+return to a v1 application, restore its compatible coordinated PostgreSQL,
+SQLite and object-manifest backup; preserve newer data separately first.
+
+State GET/PUT requests on migrated projects require
+`X-Annotation-State-Version: 2`; PUT additionally requires `schema_version: 2`.
+An incompatible client is rejected before persistence. A stale image revision
+continues to return 409. YOLO preview/export use POST under each owned project;
+export repeats preview validation and verifies its snapshot token. Downloads
+check ownership and return `private, no-store`. Export IDs are canonical UUIDs,
+not server paths. COCO calls without options retain the original mixed export
+behavior; the editor requests unique exports so concurrent downloads do not
+replace each other.

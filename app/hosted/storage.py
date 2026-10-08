@@ -31,6 +31,15 @@ class R2Store:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type,
                                CacheControl="private, no-store")
 
+    def open_stream(self, key):
+        from botocore.exceptions import ClientError
+        try:
+            return self.client.get_object(Bucket=self.bucket, Key=key)["Body"]
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in {"NoSuchKey", "404"}:
+                raise FileNotFoundError("Object not found") from exc
+            raise
+
     def get(self, key):
         from botocore.exceptions import ClientError
         try:
@@ -72,6 +81,9 @@ class FilesystemStore:
                 shutil.copyfileobj(data, output)
         else:
             path.write_bytes(data)
+
+    def open_stream(self, key):
+        return self._path(key).open("rb")
 
     def get(self, key):
         return self._path(key).read_bytes()

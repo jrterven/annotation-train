@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { api, ApiError } from "../api";
 import type {
-  Annotation,
+  SegmentationAnnotation as Annotation,
   Draft,
   GeometryResult,
   ImageState,
@@ -643,42 +643,48 @@ describe("annotation toolbar", () => {
   });
 });
 
-describe("hosted manual polygons without a GPU", () => {
-  it("rasterizes, confirms, saves and reopens a polygon without any inference request", async () => {
-    const view = await bootHosted();
-    polygon(vertices, true);
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "Refine with SAM",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
-    await waitFor(() => expect(activePart()?.mask).toEqual(seed.mask));
-    expect(activePart()?.seed_mask).toEqual(seed.mask);
-    expect(calls("/geometry")[0][2]).toEqual({
-      image_id: 1,
-      components: [{ outer: vertices, holes: [] }],
-    });
-    lastPrediction = seed;
-    fireEvent.click(screen.getByRole("button", { name: /Confirm/ }));
-    await waitFor(() => expect(current().annotations).toHaveLength(1));
-    expect(current().annotations[0].mask).toEqual(seed.mask);
-    expect(current().draft).toBeNull();
-    expect(calls("/masks/union")[0][2]).toEqual({
-      image_id: 1,
-      masks: [seed.mask],
-    });
-    expect(
-      request.mock.calls.some(([path]) => path.startsWith("/infer/")),
-    ).toBe(false);
-    await save();
-    view.unmount();
-    await bootHosted();
-    expect(current().annotations[0].mask).toEqual(seed.mask);
-    expect(current().draft).toBeNull();
-  });
+describe("manual polygons without a GPU", () => {
+  it.each(["local", "hosted"])(
+    "rasterizes, confirms, saves and reopens a polygon without inference in %s mode",
+    async (mode) => {
+      modelState = "unavailable";
+      const open = mode === "hosted" ? bootHosted : boot;
+      const view = await open();
+      polygon(vertices, true);
+      if (mode === "hosted")
+        expect(
+          (
+            screen.getByRole("button", {
+              name: "Refine with SAM",
+            }) as HTMLButtonElement
+          ).disabled,
+        ).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Use polygon" }));
+      await waitFor(() => expect(activePart()?.mask).toEqual(seed.mask));
+      expect(activePart()?.seed_mask).toEqual(seed.mask);
+      expect(calls("/geometry")[0][2]).toEqual({
+        image_id: 1,
+        components: [{ outer: vertices, holes: [] }],
+      });
+      lastPrediction = seed;
+      fireEvent.click(screen.getByRole("button", { name: /Confirm/ }));
+      await waitFor(() => expect(current().annotations).toHaveLength(1));
+      expect(current().annotations[0].mask).toEqual(seed.mask);
+      expect(current().draft).toBeNull();
+      expect(calls("/masks/union")[0][2]).toEqual({
+        image_id: 1,
+        masks: [seed.mask],
+      });
+      expect(
+        request.mock.calls.some(([path]) => path.startsWith("/infer/")),
+      ).toBe(false);
+      await save();
+      view.unmount();
+      await open();
+      expect(current().annotations[0].mask).toEqual(seed.mask);
+      expect(current().draft).toBeNull();
+    },
+  );
 
   it("preserves an invalid polygon for correction and ignores a discarded CPU result", async () => {
     await bootHosted();

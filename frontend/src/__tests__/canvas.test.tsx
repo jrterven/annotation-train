@@ -494,3 +494,80 @@ it("outlines every mask, including holes and islands, and honors opacity and mas
   );
   expect(stage.findOne(".mask-fill")!.position()).toEqual({ x: 5, y: 4 });
 });
+
+it("draws native boxes in image coordinates, clamps moves/resizes, and preserves panning", () => {
+  const onBox = vi.fn(),
+    onBoxGeometry = vi.fn();
+  const props = {
+    image: {
+      id: 31,
+      file_name: "boxes.png",
+      width: 100,
+      height: 80,
+      annotation_count: 1,
+    },
+    annotations: [],
+    proposals: [],
+    draft: null,
+    categories: [{ id: 1, name: "Object", color: "#123456" }],
+    boxes: [
+      {
+        id: "native",
+        kind: "bbox" as const,
+        category_id: 1,
+        iscrowd: 0,
+        bbox: [10, 10, 30, 20] as [number, number, number, number],
+      },
+    ],
+    selected: "native",
+    tool: "select" as "select" | "box" | "pan",
+    showMasks: false,
+    opacity: 0,
+    vertex: null,
+    busy: false,
+    onVertex: vi.fn(),
+    onSelect: vi.fn(),
+    onProposal: vi.fn(),
+    onPoint: vi.fn(),
+    onBox,
+    onBoxGeometry,
+    onPolygon: vi.fn(),
+    onGeometry: vi.fn(),
+    fitRef: { current: null },
+  };
+  const { rerender } = render(<CanvasEditor {...props} />);
+  const stage = Konva.stages.at(-1)!;
+  expect(stage.find(".mask-fill")).toHaveLength(0);
+  expect(stage.find(".box-handle")).toHaveLength(8);
+  const outline = stage.findOne(".box-outline")!;
+  act(() => {
+    outline.position({ x: 200, y: -10 });
+    outline.fire("dragmove", { evt: {} });
+  });
+  act(() => outline.fire("dragend", { evt: {} }));
+  expect(onBoxGeometry).toHaveBeenLastCalledWith("native", [70, 0, 30, 20]);
+  const bottomRight = stage.find(".box-handle").at(-1)!;
+  act(() => {
+    bottomRight.position({ x: 200, y: 200 });
+    bottomRight.fire("dragmove", { evt: {} });
+  });
+  act(() => bottomRight.fire("dragend", { evt: {} }));
+  expect(onBoxGeometry).toHaveBeenLastCalledWith("native", [10, 10, 90, 70]);
+  rerender(<CanvasEditor {...props} tool="pan" />);
+  expect(stage.find(".box-handle")).toHaveLength(0);
+  expect(stage.findOne(".box-outline")!.isListening()).toBe(false);
+  rerender(<CanvasEditor {...props} tool="box" />);
+  const group = stage.findOne("Group")!;
+  const start = group.getAbsoluteTransform().point({ x: 20, y: 25 });
+  const end = group.getAbsoluteTransform().point({ x: 120, y: 90 });
+  act(() => {
+    stage.setPointersPositions({ clientX: start.x, clientY: start.y });
+    stage.fire("mousedown", { evt: { button: 0 } });
+  });
+  act(() => {
+    stage.setPointersPositions({ clientX: end.x, clientY: end.y });
+    stage.fire("mousemove", { evt: {} });
+  });
+  act(() => stage.fire("mouseup", { evt: {} }));
+  expect(onBox).toHaveBeenLastCalledWith([20, 25, 100, 80]);
+});

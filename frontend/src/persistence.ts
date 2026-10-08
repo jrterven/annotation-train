@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errorText } from "./api";
-import type { ImageState } from "./types";
+import type {
+  ImageState,
+  ProjectImageState,
+  DetectionState,
+  BoxAnnotation,
+} from "./types";
 type Entry = {
   state: ImageState;
+  detection: DetectionState;
+  detectionPast: DetectionState[];
+  detectionFuture: DetectionState[];
+  detectionGeneration: number;
   dirty: boolean;
   saving: boolean;
   error: string | null;
@@ -14,6 +23,15 @@ type Entry = {
   inflight?: Promise<void>;
 };
 const clone = <T>(x: T): T => structuredClone(x);
+function fullState(e: Entry): ProjectImageState {
+  const { annotations: boxes, ...detection } = e.detection;
+  return clone({
+    ...e.state,
+    schema_version: 2,
+    annotations: [...e.state.annotations, ...boxes],
+    detection,
+  });
+}
 export function useWorkspace(onError: (message: string) => void) {
   const records = useRef(new Map<number, Entry>());
   const epoch = useRef(0);
@@ -35,7 +53,7 @@ export function useWorkspace(onError: (message: string) => void) {
       e.saving = true;
       e.error = null;
       const generation = e.generation;
-      const payload = clone(e.state);
+      const payload = fullState(e);
       notify();
       e.inflight = (async () => {
         try {
@@ -70,7 +88,23 @@ export function useWorkspace(onError: (message: string) => void) {
       if (!force && records.current.has(id))
         return records.current.get(id)!.state;
       const requestEpoch = epoch.current;
-      const state = await api<ImageState>(`/images/${id}/state`);
+      const full = await api<ProjectImageState>(`/images/${id}/state`);
+      const state: ImageState = {
+        image_id: full.image_id,
+        revision: full.revision,
+        annotations: full.annotations.filter((a) => a.kind !== "bbox"),
+        draft: full.draft,
+        proposals: full.proposals,
+      };
+      const detection: DetectionState = {
+        draft: null,
+        proposals: [],
+        adjustment: null,
+        ...full.detection,
+        annotations: full.annotations.filter(
+          (a): a is BoxAnnotation => a.kind === "bbox",
+        ),
+      };
       if (requestEpoch !== epoch.current) return state;
       // React Strict Mode and rapid navigation can overlap reads. A late read
       // must never replace a record that already contains user edits.
@@ -80,6 +114,10 @@ export function useWorkspace(onError: (message: string) => void) {
       if (old) clearTimeout(old.timer);
       records.current.set(id, {
         state,
+        detection,
+        detectionPast: [],
+        detectionFuture: [],
+        detectionGeneration: 0,
         dirty: false,
         saving: false,
         error: null,
@@ -126,6 +164,34 @@ export function useWorkspace(onError: (message: string) => void) {
     },
     [update],
   );
+  const updateDetection = useCallback(
+    (id: number, fn: (s: DetectionState) => DetectionState, history = true) => {
+      const e = records.current.get(id);
+      if (!e) return;
+      if (history) {
+        e.detectionPast.push(clone(e.detection));
+        if (e.detectionPast.length > 60) e.detectionPast.shift();
+        e.detectionFuture = [];
+      }
+      e.detection = fn(clone(e.detection));
+      e.detectionGeneration++;
+      update(id, (s) => s, false);
+    },
+    [update],
+  );
+  const historyDetection = useCallback(
+    (id: number, redo = false) => {
+      const e = records.current.get(id);
+      if (!e) return;
+      const from = redo ? e.detectionFuture : e.detectionPast;
+      const to = redo ? e.detectionPast : e.detectionFuture;
+      const next = from.pop();
+      if (!next) return;
+      to.push(clone(e.detection));
+      updateDetection(id, () => next, false);
+    },
+    [updateDetection],
+  );
   const flush = useCallback(async () => {
     await Promise.all(
       [...records.current.keys()].map((id) => savingFn.current(id)),
@@ -149,10 +215,17 @@ export function useWorkspace(onError: (message: string) => void) {
       }
     };
     window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
+    return () => {
+      window.removeEventListener("beforeunload", handler);
+      epoch.current++;
+      for (const e of records.current.values()) clearTimeout(e.timer);
+    };
   }, []);
   return {
     records: records.current,
+    getDetection: (id: number) => records.current.get(id)?.detection,
+    updateDetection,
+    historyDetection,
     load,
     update,
     history,
@@ -160,6 +233,12 @@ export function useWorkspace(onError: (message: string) => void) {
     flush,
     reset,
     get: (id: number) => records.current.get(id)?.state,
+    snapshot: (id: number) => {
+      const e = records.current.get(id);
+      return e ? fullState(e) : undefined;
+    },
     entry: (id: number) => records.current.get(id),
   };
 }
+
+export type Workspace = ReturnType<typeof useWorkspace>;
