@@ -6,6 +6,7 @@
 .cache
 .hosted-data
 .hosted-cache
+.private
 node_modules
 frontend/node_modules
 frontend/dist
@@ -17,6 +18,8 @@ frontend/dist
 **/._*
 .env
 .env.*
+**/*.env
+**/*.env.*
 *.pem
 *.key
 **/*credentials*.json

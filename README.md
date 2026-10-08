@@ -1,8 +1,11 @@
 # Annotation and Training
 
-A local web application for image instance segmentation with **SAM 3**. Annotate with text, visual examples (experimental), positive/negative clicks, boxes, or an approximate polygon; refine masks, edit vertices, and import/export COCO. The interface is in English. Images, prompts, and annotations are processed locally.
+A web application for image instance segmentation with **SAM 3**, with local and hosted execution modes sharing the same editor. Annotate with text, visual examples (experimental), positive/negative clicks, boxes, or an approximate polygon; refine masks, edit vertices, and import/export COCO. The interface is in English. In local mode, images, prompts, and annotations are processed on your machine.
 
 Built with React, TypeScript, React Konva, FastAPI, PyTorch, and SQLite.
+
+For changes to either mode, follow [CONTRIBUTING.md](CONTRIBUTING.md).
+Versioned publication and deployment are described in [RELEASING.md](RELEASING.md).
 
 ## Hosted mode
 

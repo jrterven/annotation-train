@@ -25,7 +25,7 @@ def setup(tmp_path):
     settings = Settings(database_url="unused", public_url="http://localhost:8765",
                         google_client_id="test", google_client_secret="test", r2_endpoint_url="unused",
                         r2_access_key_id="test", r2_secret_access_key="test", data_dir=tmp_path / "data",
-                        cache_dir=tmp_path / "cache")
+                        cache_dir=tmp_path / "cache", min_free_disk_bytes=0)
     db = Database(settings, engine=create_engine(f"sqlite:///{tmp_path / 'source.sqlite3'}"))
     db.create_schema()
     objects = FilesystemStore(tmp_path / "objects")
