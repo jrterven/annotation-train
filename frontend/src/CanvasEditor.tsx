@@ -21,7 +21,7 @@ import type {
   Tool,
   XY,
 } from "./types";
-import { maskContains, maskURL } from "./masks";
+import { maskContains, maskOverlay } from "./masks";
 import { assetURL } from "./api";
 import { sourceImages } from "./imageCache";
 export type Vertex = { component: number; ring: number; index: number };
@@ -89,11 +89,13 @@ function MaskImage({
   color: string;
   opacity: number;
 }) {
-  const url = useMemo(() => maskURL(mask, color), [mask, color]);
-  const image = useImage(url);
+  const overlay = useMemo(() => maskOverlay(mask, color), [mask, color]);
+  const image = useImage(overlay.url);
   return (
     <KonvaImage
       name="mask-fill"
+      x={overlay.x}
+      y={overlay.y}
       image={image}
       opacity={Math.min(1, Math.max(0, opacity))}
       listening={false}

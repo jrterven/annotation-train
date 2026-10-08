@@ -21,6 +21,16 @@ def test_rle_roundtrip_matches_official_decoder():
     assert np.array_equal(coco_mask.decode(encoded), mask)
 
 
+def test_compact_payload_preserves_exact_geometry_without_rendering_preview(monkeypatch):
+    mask = np.zeros((17, 23), dtype=bool)
+    mask[2:15, 3:20] = True
+    mask[6:9, 8:12] = False
+    expected = mask_payload(mask)
+    expected.pop("preview")
+    monkeypatch.setattr("app.geometry.mask_preview", lambda *_: pytest.fail("Unexpected PNG rendering"))
+    assert mask_payload(mask, include_preview=False) == expected
+
+
 def test_uncompressed_rle_is_column_major():
     mask = decode_mask({"size": [3, 5], "counts": [4, 2, 9]})
     assert set(map(tuple, np.argwhere(mask))) == {(1, 1), (2, 1)}

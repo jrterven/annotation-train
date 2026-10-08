@@ -8,6 +8,16 @@ import type { Draft } from "../types";
 // jsdom has no graphics engine. Stub only its drawing surface; keep the real
 // Konva scene graph and React reconciler so invalid canvas children still fail.
 vi.hoisted(() => {
+  vi.stubGlobal(
+    "ImageData",
+    class {
+      constructor(
+        public data: Uint8ClampedArray,
+        public width: number,
+        public height: number,
+      ) {}
+    },
+  );
   Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
     configurable: true,
     value: function (this: HTMLCanvasElement) {
@@ -471,4 +481,16 @@ it("outlines every mask, including holes and islands, and honors opacity and mas
   expect(stage.find(".mask-outline")).toHaveLength(0);
   expect(stage.find("Circle")).toHaveLength(12);
   expect(JSON.stringify(annotation)).toBe(original);
+  rerender(
+    <CanvasEditor
+      {...props}
+      image={{ ...props.image, width: 12, height: 10 }}
+      annotations={[
+        { ...annotation, mask: { size: [10, 12], counts: "f1280^1" } },
+      ]}
+      proposals={[]}
+      draft={null}
+    />,
+  );
+  expect(stage.findOne(".mask-fill")!.position()).toEqual({ x: 5, y: 4 });
 });

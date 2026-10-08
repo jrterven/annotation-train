@@ -78,6 +78,49 @@ def test_points_preserve_revision_and_content_addressed_image_key():
     assert result["image_id"] == 1 and result["revision"] == 7
     assert result["mask"]["size"] == [20, 30]
     assert engine.key == f"{value.project_id}:1:{value.sha256}"
+    assert "preview" not in result
+
+
+def test_decoded_cache_reuses_pixels_and_checks_scope_content_eviction_and_ttl(monkeypatch):
+    from app.hosted.image_cache import DecodedImageCache
+    now = [0.0]
+    cache = DecodedImageCache(max_bytes=2700, ttl=30, clock=lambda: now[0])
+    value = request()
+    decoded = []
+
+    def decode(encoded):
+        decoded.append(encoded)
+        return decode_image(encoded)
+
+    monkeypatch.setattr("app.hosted.job_protocol.decode_image", decode)
+    first = cache.resolve(value)
+    assert cache.resolve(value) is first and len(decoded) == 1
+    other = request(image_base64=value.image_base64, sha256=value.sha256)
+    cache.resolve(other)  # Identical bytes in another project have separate scope.
+    assert len(decoded) == 2 and value.image_key not in cache.entries
+    cache.resolve(value)
+    assert len(decoded) == 3 and cache.bytes <= 2700
+    with pytest.raises(ValueError):
+        cache.resolve(value.model_copy(update={"image_base64": "not-base64"}))
+    assert cache.resolve(value).size == (30, 20)
+    now[0] = 31
+    cache.prune()
+    assert not cache.entries and cache.bytes == 0
+    uncached = DecodedImageCache(max_bytes=1)
+    assert uncached.resolve(value).size == (30, 20)
+    assert not uncached.entries  # A cache budget never imposes an image limit.
+
+
+def test_hosted_inference_cache_preserves_results_and_never_renders_previews(monkeypatch):
+    from app.hosted.image_cache import DecodedImageCache
+    value = request()
+    monkeypatch.setattr("app.geometry.mask_preview", lambda *_: pytest.fail("Unexpected PNG rendering"))
+    expected = execute_inference(Engine(), Translator(), value)
+    cache = DecodedImageCache()
+    assert execute_inference(Engine(), Translator(), value, image_cache=cache) == expected
+    assert execute_inference(Engine(), Translator(), value, image_cache=cache) == expected
+    with pytest.raises(ValueError, match="checksum"):
+        execute_inference(Engine(), Translator(), value.model_copy(update={"sha256": "0" * 64}), image_cache=cache)
 
 
 def test_text_and_visual_preserve_local_contract_and_translate():
@@ -189,7 +232,10 @@ def test_linux_container_pid_one_is_a_valid_supervisor(monkeypatch):
     from app.hosted.worker import _model_process
 
     sent = []
+    idle = []
     class Connection:
+        def poll(self, timeout):
+            return bool(idle)
         def send(self, value):
             sent.append(value)
         def recv(self):
@@ -202,8 +248,10 @@ def test_linux_container_pid_one_is_a_valid_supervisor(monkeypatch):
     monkeypatch.setattr(ctypes, "CDLL", lambda *_: SimpleNamespace(prctl=lambda *_: 0))
     monkeypatch.setattr("app.inference.Sam3Engine", lambda **_: SimpleNamespace(load=lambda: None))
     monkeypatch.setattr("app.hosted.worker.execute_inference", lambda *_: {})
+    monkeypatch.setattr("app.hosted.worker.DecodedImageCache", lambda: SimpleNamespace(prune=lambda: idle.append(True)))
     _model_process(Connection(), expected_parent=1)
     assert sent == [{"type": "ready"}]
+    assert idle == [True]
 
 
 def test_launcher_binds_only_loopback_and_tailnet_and_never_trusts_forwarded_headers(monkeypatch):

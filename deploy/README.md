@@ -71,6 +71,25 @@ full-resolution overlay under the quota lock during image navigation or each
 new prompt. Original masks, contours, controls and revisions are unchanged;
 the local API retains its existing preview response contract.
 
+The model subprocess also retains decoded originals in a separate 256 MiB LRU
+(including encoded bytes in its accounting), with the same 30-minute idle TTL
+and project/image/digest scope. Cache hits require matching source bytes; eviction
+or a larger image falls back to decoding without an upload-size restriction.
+Hosted inference returns exact RLE, contours and controls without generating
+unused PNG overlays. Local inference continues to include PNG previews.
+
+The editor immediately queries `/api/v1/jobs/{id}?wait_ms=1000` after receiving
+the durable job ID. The authenticated endpoint waits asynchronously for up to
+one second, checking completion and project access every 50 ms without retaining
+a database transaction or worker thread between checks. It returns as soon as a
+result is ready. Requests without `wait_ms` retain immediate status behavior;
+cancellation and reconnects continue to use the original job ID.
+
+Browser mask overlays use the occupied RLE bounding rectangle, placed at its
+original image coordinates, instead of a full-image RGBA canvas for every
+object. This changes only the transient rendering allocation: masks, holes,
+contours, hit testing, annotations and COCO export retain their exact pixels.
+
 ## Large source images
 
 Project originals have no fixed byte or megapixel ceiling. The account/global

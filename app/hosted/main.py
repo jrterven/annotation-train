@@ -1,5 +1,6 @@
 """CPU-only public API; ownership is checked before every project/object operation."""
 from contextlib import contextmanager
+import asyncio
 import base64
 import hashlib
 import io
@@ -13,7 +14,7 @@ import time
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from app.images import Image
@@ -469,9 +470,7 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
                     raise ValueError("Reference box lies outside the image")
         return submit(project_id, "visual", body, request)
 
-    @app.get("/api/v1/jobs/{job_id}")
-    def job_status(job_id: str, request: Request):
-        user_id = auth.user_for_request(request)
+    def read_job_status(job_id, user_id):
         with db.session() as session:
             job = session.get(Job, job_id)
             if not job or job.user_id != user_id:
@@ -480,6 +479,21 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             if project is None or project.deleted_at:
                 raise HTTPException(404, "Job not found")
             return jobs.serialize(job)
+
+    @app.get("/api/v1/jobs/{job_id}")
+    async def job_status(job_id: str, request: Request, wait_ms: int = Query(default=0, ge=0, le=1000)):
+        user_id = auth.user_for_request(request)
+        deadline = time.monotonic() + wait_ms / 1000
+        while True:
+            # No transaction/thread/lock is retained while waiting. Every read
+            # rechecks project access, so deletion revokes a pending response.
+            status = await run_in_threadpool(read_job_status, job_id, user_id)
+            remaining = deadline - time.monotonic()
+            if status["status"] in jobs.TERMINAL or remaining <= 0:
+                return status
+            if await request.is_disconnected():
+                return Response(status_code=204)
+            await asyncio.sleep(min(.05, remaining))
 
     @app.post("/api/v1/jobs/{job_id}/cancel")
     def cancel(job_id: str, request: Request):

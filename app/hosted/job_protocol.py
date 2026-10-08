@@ -128,22 +128,25 @@ def reference_image(payload: dict) -> tuple[Image.Image, list[float] | None]:
     return image, box
 
 
-def execute_inference(engine, translator, request: AttemptRequest) -> dict:
+def execute_inference(engine, translator, request: AttemptRequest, *, image_cache=None) -> dict:
     """Same masks, proposals and revisions as the local editor's API."""
     from app.geometry import mask_payload
 
     if request.image_base64 is None:
         raise ValueError("The target image is missing")
-    image, digest = decode_image(request.image_base64)
-    if digest != request.sha256:
-        raise ValueError("Image checksum does not match its immutable identity.")
+    if image_cache is not None:
+        image = image_cache.resolve(request)
+    else:
+        image, digest = decode_image(request.image_base64)
+        if digest != request.sha256:
+            raise ValueError("Image checksum does not match its immutable identity.")
     prompt = request.payload
     result = {"image_id": request.image_id, "revision": prompt.get("revision", 0)}
     if request.kind == "points":
         seed = prompt["part"].get("seed_mask")
         if seed is not None and (not isinstance(seed, dict) or seed.get("size") != [image.height, image.width]):
             raise ValueError("Seed mask must match the target image.")
-        return bounded_result({**result, **mask_payload(engine.predict_points(image, request.image_key, prompt["part"]))})
+        return bounded_result({**result, **mask_payload(engine.predict_points(image, request.image_key, prompt["part"]), include_preview=False)})
     english = translator.translate(prompt["text"], prompt["source_language"]) if prompt["text"].strip() else None
     if request.kind == "text":
         predictions = engine.predict_text(image, request.image_key, english)
@@ -157,7 +160,7 @@ def execute_inference(engine, translator, request: AttemptRequest) -> dict:
     from uuid import NAMESPACE_URL, uuid5
     result["proposals"] = [
         {"id": str(uuid5(NAMESPACE_URL, f"{request.job_id}:{i}")), "category_id": prompt["category_id"],
-         "iscrowd": 0, "score": float(prediction["score"]), "selected": True, **mask_payload(prediction["mask"])}
+         "iscrowd": 0, "score": float(prediction["score"]), "selected": True, **mask_payload(prediction["mask"], include_preview=False)}
         for i, prediction in enumerate(predictions)
     ]
     if english is not None:

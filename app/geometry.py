@@ -219,12 +219,15 @@ def mask_preview(mask: np.ndarray, color: str = "#8B8DE3") -> str:
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def mask_payload(mask: np.ndarray, color: str = "#8B8DE3") -> dict:
+def mask_payload(mask: np.ndarray, color: str = "#8B8DE3", *, include_preview: bool = True) -> dict:
     array = np.asarray(mask, dtype=bool)
     encoded = encode_mask(array)
     shape = _mask_shape(array)
-    return {"mask": encoded, "components": _shape_components(shape),
-            "controls": _control_components(shape), "preview": mask_preview(array, color)}
+    result = {"mask": encoded, "components": _shape_components(shape),
+              "controls": _control_components(shape)}
+    if include_preview:
+        result["preview"] = mask_preview(array, color)
+    return result
 
 
 def fill_small_holes(mask: np.ndarray, max_area: int = 16) -> tuple[np.ndarray, int, int]:

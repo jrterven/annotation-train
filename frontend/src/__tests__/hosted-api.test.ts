@@ -104,12 +104,12 @@ describe("persistent inference jobs", () => {
         response({ id: "job-a", status: "succeeded", result }),
       );
     const task = api("/infer/text", "POST", { image_id: 7 });
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(0);
     await expect(task).resolves.toEqual(result);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/api/v1/projects/private-project/infer/text",
-      "/api/v1/jobs/job-a",
-      "/api/v1/jobs/job-a",
+      "/api/v1/jobs/job-a?wait_ms=1000",
+      "/api/v1/jobs/job-a?wait_ms=1000",
     ]);
   });
   it("cancels server work even if the caller aborts before enqueue returns", async () => {
@@ -143,6 +143,40 @@ describe("persistent inference jobs", () => {
       }),
     );
   });
+  it("cancels an outstanding result wait without resubmitting the job", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        response({ id: "job-wait", status: "running" }, 202),
+      )
+      .mockImplementationOnce(
+        (_, options) =>
+          new Promise((_, reject) => {
+            options.signal.addEventListener("abort", () =>
+              reject(new DOMException("Cancelled", "AbortError")),
+            );
+          }),
+      )
+      .mockResolvedValueOnce(response({ status: "cancelled" }));
+    const controller = new AbortController();
+    const task = api(
+      "/infer/points",
+      "POST",
+      { image_id: 7 },
+      controller.signal,
+    );
+    const rejected = expect(task).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "/api/v1/jobs/job-wait?wait_ms=1000",
+    );
+    controller.abort();
+    await rejected;
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/v1/projects/private-project/infer/points",
+      "/api/v1/jobs/job-wait?wait_ms=1000",
+      "/api/v1/jobs/job-wait/cancel",
+    ]);
+  });
   it("recovers from a temporary poll failure without resubmitting inference", async () => {
     vi.useFakeTimers();
     const progress: string[] = [];
@@ -160,7 +194,7 @@ describe("persistent inference jobs", () => {
         }),
       );
     const task = api("/infer/points", "POST", { image_id: 7 });
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(0);
     expect(progress.at(-1)).toBe("reconnecting");
     await vi.advanceTimersByTimeAsync(1000);
     await expect(task).resolves.toEqual({ mask: "result" });
@@ -182,7 +216,7 @@ it("reports cancellation that could not reach the server", async () => {
     .mockResolvedValueOnce(
       response({ id: "job-unknown", status: "queued" }, 202),
     )
-    .mockRejectedValueOnce(new TypeError("Offline"));
+    .mockRejectedValue(new TypeError("Offline"));
   const controller = new AbortController();
   const pending = api(
     "/infer/points",

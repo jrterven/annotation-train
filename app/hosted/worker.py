@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from .job_protocol import AttemptRequest, ResultTooLarge, execute_inference
-from .image_cache import WorkerImageCache
+from .image_cache import DecodedImageCache, WorkerImageCache
 
 
 def _model_process(connection, expected_parent=None):
@@ -64,13 +64,17 @@ def _model_process(connection, expected_parent=None):
         for kind, payload in probes:
             execute_inference(engine, translator, AttemptRequest(kind=kind, payload=payload, **common))
         connection.send({"type": "ready"})
+        images = DecodedImageCache()
         while True:
+            if not connection.poll(1):
+                images.prune()  # Expire private pixels even while idle.
+                continue
             raw = connection.recv()
             if raw is None:
                 return
             request = AttemptRequest.model_validate(raw)
             try:
-                result = execute_inference(engine, translator, request)
+                result = execute_inference(engine, translator, request, image_cache=images)
                 connection.send({"type": "result", "attempt_id": str(request.attempt_id),
                                  "status": "succeeded", "result": result, "error": None})
             except ResultTooLarge:

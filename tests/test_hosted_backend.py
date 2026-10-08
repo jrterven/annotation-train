@@ -93,6 +93,42 @@ def test_hosted_state_and_inference_skip_unused_mask_previews(hosted, monkeypatc
     assert clients["bob"].get(path + "/images/1/state").status_code == 404
 
 
+@pytest.mark.parametrize("outcome", ["succeeded", "cancelled", "deleted"])
+def test_job_wait_delivers_completion_and_rechecks_ownership(hosted, monkeypatch, outcome):
+    _, db, _, _, clients = hosted
+    client = clients["alice"]
+    project = project_and_image(client)
+    job = client.post(f"/api/v1/projects/{project['id']}/infer/points", json={
+        "image_id": 1, "revision": 0, "part": {"points": [{"x": 5, "y": 5, "label": 1}]}}).json()
+    path = f"/api/v1/jobs/{job['id']}"
+    assert client.get(path).json()["status"] == "queued"
+    assert client.get(path + "?wait_ms=10").json()["status"] == "queued"
+    assert client.get(path + "?wait_ms=1001").status_code == 422
+    assert clients["bob"].get(path + "?wait_ms=1000").status_code == 404
+
+    async def complete_after_read(seconds):
+        # The read transaction must have ended before waiting. Commit a new
+        # state as an independent dispatcher/deletion request would do.
+        with db.session() as session:
+            if outcome == "deleted":
+                session.get(Project, project["id"]).deleted_at = utcnow()
+            else:
+                row = session.get(Job, job["id"])
+                row.status = outcome
+                row.result = {"image_id": 1, "revision": 0}
+
+    monkeypatch.setattr("app.hosted.main.asyncio.sleep", complete_after_read)
+    response = client.get(path + "?wait_ms=1000")
+    if outcome == "deleted":
+        assert response.status_code == 404
+    else:
+        assert response.status_code == 200
+        assert response.json()["status"] == outcome
+        if outcome == "succeeded":
+            assert response.json()["result"] == {"image_id": 1, "revision": 0}
+    assert response.headers["cache-control"] == "private, no-store"
+
+
 def test_hosted_config_fails_closed(hosted):
     settings, *_ = hosted
     for bad in [replace(settings, environment="prod"), replace(settings, database_url="sqlite://"),

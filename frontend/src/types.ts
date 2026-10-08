@@ -74,7 +74,7 @@ export type GeometryResult = {
   mask: Mask;
   components: Component[];
   controls?: Component[];
-  preview: string;
+  preview?: string;
 };
 export type ModelStatus = { state: string; device?: string; message?: string };
 export type Tool =

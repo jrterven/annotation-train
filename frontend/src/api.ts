@@ -154,9 +154,13 @@ async function waitForJob<T>(
         );
       if (job.status === "cancelled")
         throw new DOMException("Request cancelled", "AbortError");
-      await delay(failures ? 1000 : 500, signal);
+      if (failures) await delay(1000, signal);
       try {
-        job = (await request<Job<T>>(url, "GET", undefined, signal)).data;
+        // The server returns as soon as the durable result is ready. Keep the
+        // initial admission immediate so cancellation always has its job ID.
+        job = (
+          await request<Job<T>>(`${url}?wait_ms=1000`, "GET", undefined, signal)
+        ).data;
         failures = 0;
       } catch (error) {
         if (
