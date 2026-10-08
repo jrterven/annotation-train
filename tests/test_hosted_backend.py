@@ -93,6 +93,41 @@ def test_hosted_state_and_inference_skip_unused_mask_previews(hosted, monkeypatc
     assert clients["bob"].get(path + "/images/1/state").status_code == 404
 
 
+@pytest.mark.parametrize("kind", ["points", "text", "visual"])
+def test_inference_survives_draft_autosave_without_overwriting_annotations(hosted, kind):
+    _, db, _, _, clients = hosted
+    client = clients["alice"]
+    project = project_and_image(client)
+    root = f"/api/v1/projects/{project['id']}"
+    category = client.post(root + "/categories", json={"name": "Object"}).json()
+    state = client.get(root + "/images/1/state").json()
+    # The browser has prepared a prompt, but a preceding draft deletion saves
+    # before the prompt reaches admission (or before the save response arrives).
+    payload = {"image_id": 1, "revision": state["revision"]}
+    if kind == "points":
+        payload["part"] = {"id": "new-part", "points": [{"x": 5, "y": 5, "label": 1}]}
+    else:
+        payload.update(text="object", category_id=category["id"], source_language="en")
+        if kind == "visual":
+            import base64
+            payload["reference_image"] = base64.b64encode(image_bytes()).decode()
+            payload["reference_box"] = None
+    saved = client.put(root + "/images/1/state", json=state).json()
+    assert saved["revision"] == state["revision"] + 1
+
+    response = client.post(root + f"/infer/{kind}", json=payload)
+    assert response.status_code == 202, response.text
+    with db.session() as session:
+        job = session.get(Job, response.json()["id"])
+        assert job.payload == payload
+    assert client.get(root + "/images/1/state").json() == saved
+    # Writes still require the current revision, and ownership still applies.
+    assert client.put(root + "/images/1/state", json=state).status_code == 409
+    assert clients["bob"].post(root + f"/infer/{kind}", json=payload).status_code == 404
+    assert client.delete(root).status_code == 200
+    assert client.post(root + f"/infer/{kind}", json=payload).status_code == 404
+
+
 @pytest.mark.parametrize("outcome", ["succeeded", "cancelled", "deleted"])
 def test_job_wait_delivers_completion_and_rechecks_ownership(hosted, monkeypatch, outcome):
     _, db, _, _, clients = hosted

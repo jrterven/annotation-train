@@ -1007,10 +1007,19 @@ kbd {
 }
 .part-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   border: 1px solid transparent;
   border-radius: 5px;
   margin-bottom: 4px;
+}
+.part-error {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0 8px 8px;
+  color: #943b2d;
+  font-size: 10px;
+  overflow-wrap: anywhere;
 }
 .part-item.active {
   background: #e4ead9;

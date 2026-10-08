@@ -438,9 +438,10 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
         with owned(request, project_id) as (session, project, store):
             image = image_record(session, project_id, body.image_id)
             validate_mask_dimensions(body.model_dump(), image)
-            state = store.get_state(body.image_id, include_previews=False)
-            if state["revision"] != body.revision:
-                raise HTTPException(409, "Image revision changed; reload before inference")
+            # Prompts are self-contained and the source image is immutable.
+            # A concurrent autosave (e.g. discarding the previous draft) must
+            # not reject a new prompt. Revisions still fence annotation writes;
+            # the editor fences results by draft/part identity and prompt.
             if kind != "points" and body.category_id not in {c["id"] for c in store.project()["categories"]}:
                 raise ValueError("Select a valid class")
         return jobs.enqueue(db, settings, user_id, project_id, body.image_id, kind, body.model_dump())

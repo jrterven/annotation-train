@@ -187,6 +187,7 @@ export default function App({
   const [maxHoleArea, setMaxHoleArea] = useState("16");
   const [workVersion, setWorkVersion] = useState(0);
   const pending = useRef(new Map<string, Pending>());
+  const partErrors = useRef(new Map<string, string>());
   const fitRef = useRef<(() => void) | null>(null);
   const geometryToken = useRef("");
   const sessionToken = useRef(0);
@@ -230,6 +231,7 @@ export default function App({
   function abortAll() {
     for (const p of pending.current.values()) p.controller.abort();
     pending.current.clear();
+    partErrors.current.clear();
     invalidate();
   }
   function openProject(result: Project) {
@@ -423,6 +425,7 @@ export default function App({
   async function inferPart(id: number, draftId: string, part: Part) {
     const key = `part:${id}:${part.id}`;
     pending.current.get(key)?.controller.abort();
+    partErrors.current.delete(key);
     const controller = new AbortController();
     const token = uid();
     pending.current.set(key, {
@@ -515,11 +518,11 @@ export default function App({
       )
         setTool((current) => (current === "polygon" ? "positive" : current));
     } catch (e) {
-      if (
-        pending.current.get(key)?.token === token &&
-        !(e instanceof Error && e.name === "AbortError")
-      )
-        setToast(`SAM 3: ${errorText(e)}`);
+      if (isCurrent() && !(e instanceof Error && e.name === "AbortError")) {
+        const message = errorText(e);
+        partErrors.current.set(key, message);
+        setToast(`SAM 3: ${message}`);
+      }
     } finally {
       if (pending.current.get(key)?.token === token)
         pending.current.delete(key);
@@ -547,6 +550,7 @@ export default function App({
     const key = `part:${imageId}:${original.id}`;
     pending.current.get(key)?.controller.abort();
     pending.current.delete(key);
+    partErrors.current.delete(key);
     draft.parts[index] = {
       id: original.id,
       points: [],
@@ -704,6 +708,7 @@ export default function App({
     const key = `part:${imageId}:${id}`;
     pending.current.get(key)?.controller.abort();
     pending.current.delete(key);
+    partErrors.current.delete(key);
     invalidate();
     update((s) => {
       if (!s.draft) return s;
@@ -730,6 +735,7 @@ export default function App({
       const key = `part:${imageId}:${part.id}`;
       pending.current.get(key)?.controller.abort();
       pending.current.delete(key);
+      partErrors.current.delete(key);
     }
     invalidate();
     update((s) => ({ ...s, draft: null }));
@@ -1897,15 +1903,19 @@ export default function App({
                             <small>
                               {part.mask
                                 ? "Ready"
-                                : part.polygon && !part.seed_mask
-                                  ? part.polygon.closed
-                                    ? "Closed polygon"
-                                    : `${part.polygon.vertices.length} vertices`
-                                  : part.points.length ||
-                                      part.box ||
-                                      part.seed_mask
-                                    ? "Pending"
-                                    : "No prompts"}
+                                : partErrors.current.has(
+                                      `part:${imageId}:${part.id}`,
+                                    )
+                                  ? "Failed"
+                                  : part.polygon && !part.seed_mask
+                                    ? part.polygon.closed
+                                      ? "Closed polygon"
+                                      : `${part.polygon.vertices.length} vertices`
+                                    : part.points.length ||
+                                        part.box ||
+                                        part.seed_mask
+                                      ? "Pending"
+                                      : "No prompts"}
                             </small>
                           </button>
                           {!part.mask &&
@@ -1930,6 +1940,19 @@ export default function App({
                             title="Remove part"
                             onClick={() => removePart(part.id)}
                           />
+                          {!part.mask &&
+                            partErrors.current.has(
+                              `part:${imageId}:${part.id}`,
+                            ) && (
+                              <p className="part-error" role="alert">
+                                {partErrors.current.get(
+                                  `part:${imageId}:${part.id}`,
+                                )}{" "}
+                                {part.polygon && !part.seed_mask
+                                  ? "Check the polygon, then use Refine with SAM to try again."
+                                  : "Use Retry segmentation to try again."}
+                              </p>
+                            )}
                         </div>
                       ))}
                     </div>

@@ -291,6 +291,91 @@ afterEach(async () => {
 });
 
 describe("polygon to SAM application flow", () => {
+  it.each(["ready", "running"])(
+    "segments a new draft after discarding a %s draft with the trash button",
+    async (stage) => {
+      const confirmed = {
+        ...prediction,
+        id: "kept",
+        category_id: 1,
+        iscrowd: 0,
+      };
+      disk.get(1)!.annotations = [confirmed];
+      const first = deferred<
+        GeometryResult & { image_id: number; revision: number }
+      >();
+      const second = deferred<
+        GeometryResult & { image_id: number; revision: number }
+      >();
+      let count = 0;
+      inference = () => (++count === 1 ? first.promise : second.promise);
+      await bootHosted();
+      act(() => current().onPoint([3, 3], false));
+      const oldDraft = current().draft!;
+      const oldSignal = calls("/infer/points")[0][3];
+      if (stage === "ready") {
+        await act(async () =>
+          first.resolve({ ...prediction, image_id: 1, revision: 0 }),
+        );
+        expect(activePart()?.mask).toEqual(prediction.mask);
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+      expect(current().draft).toBeNull();
+      if (stage === "running") expect(oldSignal?.aborted).toBe(true);
+      // Autosave can advance the annotation revision while a new prompt runs.
+      await save();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Positive point · P" }),
+      );
+      act(() => current().onPoint([2, 3], false));
+      expect(current().draft?.id).not.toBe(oldDraft.id);
+      expect(activePart()?.id).not.toBe(oldDraft.active_part_id);
+      await save();
+      if (stage === "running") {
+        await act(async () =>
+          first.resolve({ ...prediction, image_id: 1, revision: 0 }),
+        );
+        expect(activePart()?.mask).toBeUndefined();
+      }
+      const { preview: _preview, ...withoutPreview } = corrected;
+      await act(async () =>
+        second.resolve({ ...withoutPreview, image_id: 1, revision: 1 }),
+      );
+      expect(activePart()?.mask).toEqual(corrected.mask);
+      expect(activePart()?.points).toEqual([{ x: 2, y: 3, label: 1 }]);
+      expect(
+        (screen.getByRole("button", { name: "Confirm ↵" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      expect(current().annotations).toEqual([confirmed]);
+    },
+  );
+
+  it("keeps a segmentation failure visible and clears it when the part is retried", async () => {
+    inference = async () => {
+      throw new ApiError(503, "SAM unavailable");
+    };
+    await bootHosted();
+    act(() => current().onPoint([3, 3], false));
+    await screen.findByRole("button", { name: /Part 1.*Failed/ });
+    expect(screen.getByRole("alert").textContent).toContain("SAM unavailable");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Dismiss notification" }),
+    );
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Retry segmentation",
+    );
+    inference = async (body) => ({
+      ...prediction,
+      image_id: body.image_id,
+      revision: body.revision,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry segmentation" }));
+    await waitFor(() => expect(activePart()?.mask).toEqual(prediction.mask));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: /Part 1.*Ready/ })).toBeTruthy();
+  });
+
   it("only infers on request, preserves the polygon seed through corrections, and confirms the final mask", async () => {
     await boot();
     fireEvent.keyDown(document.body, { key: "g" });
@@ -388,7 +473,9 @@ describe("polygon to SAM application flow", () => {
     fireEvent.click(
       screen.getAllByRole("button", { name: /^Refine with SAM$/ })[0],
     );
-    await screen.findByText(/The polygon intersects itself/);
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "The polygon intersects itself",
+    );
     expect(activePart()?.polygon).toEqual({ vertices: crossing, closed: true });
     expect(activePart()?.seed_mask).toBeUndefined();
     expect(activePart()?.mask).toBeUndefined();
