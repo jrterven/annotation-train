@@ -23,6 +23,10 @@ def google_picture(value):
     """Keep only Google's HTTPS profile images, never arbitrary remote content."""
     if not isinstance(value, str) or len(value) > 2048:
         return None
+    # Browsers treat backslashes as path separators in HTTPS URLs, unlike
+    # urlsplit. Reject ambiguous input before checking the allowed hostname.
+    if "\\" in value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        return None
     try:
         url = urlsplit(value)
         if (url.scheme == "https" and url.hostname and url.hostname.endswith(".googleusercontent.com")

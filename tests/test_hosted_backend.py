@@ -571,6 +571,25 @@ def test_google_picture_rejects_non_google_or_invalid_urls(value):
     assert auth.google_picture(value) is None
 
 
+@pytest.mark.parametrize("value", [
+    r"https://evil.example\lh3.googleusercontent.com/a",
+    r"https://evil.example\.googleusercontent.com/a",
+    r"https://lh3.googleusercontent.com\a",
+    "https://lh3.googleusercontent.com/\nprofile",
+    "https://lh3.googleusercontent.com/\tprofile",
+    "\x00https://lh3.googleusercontent.com/a",
+    " https://lh3.googleusercontent.com/a",
+])
+def test_google_picture_rejects_browser_normalized_urls_in_existing_sessions(hosted, value):
+    assert auth.google_picture(value) is None
+    _, db, _, _, clients = hosted
+    with db.session() as session:
+        session.get(User, "alice").picture = value
+    response = clients["alice"].get("/api/v1/auth/session")
+    assert response.status_code == 200
+    assert response.json()["user"]["picture"] is None
+
+
 def test_existing_account_schema_upgrades_without_changing_sessions_or_quotas(hosted):
     from sqlalchemy import text
     _, db, _, _, clients = hosted
