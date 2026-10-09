@@ -138,7 +138,8 @@ it.each(["pan", "space"] as const)(
       });
       stage.fire("mousemove", { evt: {} });
     });
-    expect(group.position()).toEqual({ x: before.x + 80, y: before.y - 40 });
+    expect(group.x()).toBeCloseTo(before.x + 80, 10);
+    expect(group.y()).toBeCloseTo(before.y - 40, 10);
     act(() => stage.fire("mouseup", { evt: {} }));
     expect(wrap.classList.contains("dragging")).toBe(false);
     for (const callback of [
@@ -570,4 +571,150 @@ it("draws native boxes in image coordinates, clamps moves/resizes, and preserves
   });
   act(() => stage.fire("mouseup", { evt: {} }));
   expect(onBox).toHaveBeenLastCalledWith([20, 25, 100, 80]);
+});
+
+it("uses proportional, reversible wheel zoom anchored to original pixels and accumulates batched events", () => {
+  const props = {
+    image: {
+      id: 99,
+      file_name: "zoom.png",
+      width: 1200,
+      height: 900,
+      annotation_count: 0,
+    },
+    annotations: [],
+    proposals: [],
+    draft: null,
+    categories: [],
+    selected: null,
+    tool: "positive" as const,
+    showMasks: true,
+    opacity: 0.5,
+    vertex: null,
+    busy: false,
+    onVertex: vi.fn(),
+    onSelect: vi.fn(),
+    onProposal: vi.fn(),
+    onPoint: vi.fn(),
+    onBox: vi.fn(),
+    onPolygon: vi.fn(),
+    onGeometry: vi.fn(),
+    fitRef: { current: null },
+  };
+  render(<CanvasEditor {...props} />);
+  const stage = Konva.stages.at(-1)!;
+  const group = stage.findOne("Group")!;
+  const anchor = { x: 350, y: 280 };
+  const originalPoint = () =>
+    group.getAbsoluteTransform().copy().invert().point(anchor);
+  const before = originalPoint();
+  const originalScale = group.scaleX();
+  const wheel = (deltaY: number, deltaMode = 0) => {
+    stage.setPointersPositions({ clientX: anchor.x, clientY: anchor.y });
+    stage.fire("wheel", {
+      evt: { deltaY, deltaMode, preventDefault: vi.fn() },
+    });
+  };
+  act(() => wheel(-1));
+  expect(group.scaleX() / originalScale).toBeGreaterThan(1);
+  expect(group.scaleX() / originalScale).toBeLessThan(1.01);
+  expect(originalPoint().x).toBeCloseTo(before.x);
+  expect(originalPoint().y).toBeCloseTo(before.y);
+  act(() => wheel(1));
+  expect(group.scaleX()).toBeCloseTo(originalScale, 10);
+  act(() => {
+    for (let i = 0; i < 20; i++) wheel(-1);
+  });
+  const batched = group.scaleX();
+  act(() => wheel(20));
+  expect(group.scaleX()).toBeCloseTo(originalScale, 10);
+  act(() => wheel(-20));
+  expect(group.scaleX()).toBeCloseTo(batched, 10);
+  act(() => wheel(20));
+  act(() => wheel(-1, 1));
+  const lineScale = group.scaleX();
+  act(() => wheel(16, 0));
+  expect(group.scaleX()).toBeCloseTo(originalScale, 10);
+  expect(lineScale).toBeGreaterThan(originalScale);
+  act(() => wheel(-10000, 2));
+  expect(group.scaleX() / originalScale).toBeLessThan(1.09);
+  act(() => wheel(0));
+  expect(originalPoint().x).toBeCloseTo(before.x);
+  expect(props.onPoint).not.toHaveBeenCalled();
+  expect(props.onGeometry).not.toHaveBeenCalled();
+});
+
+it("keeps the same center pixel and scale when a panel resizes the canvas", () => {
+  const originalObserver = globalThis.ResizeObserver;
+  let measure!: (
+    entries: { contentRect: { width: number; height: number } }[],
+  ) => void;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: typeof measure) {
+        measure = callback;
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  const props = {
+    image: {
+      id: 100,
+      file_name: "resize.png",
+      width: 1200,
+      height: 900,
+      annotation_count: 0,
+    },
+    annotations: [],
+    proposals: [],
+    draft: null,
+    categories: [],
+    selected: null,
+    tool: "box" as const,
+    showMasks: true,
+    opacity: 0.5,
+    vertex: null,
+    busy: false,
+    onVertex: vi.fn(),
+    onSelect: vi.fn(),
+    onProposal: vi.fn(),
+    onPoint: vi.fn(),
+    onBox: vi.fn(),
+    onPolygon: vi.fn(),
+    onGeometry: vi.fn(),
+    fitRef: { current: null },
+  };
+  try {
+    render(<CanvasEditor {...props} />);
+    act(() => measure([{ contentRect: { width: 900, height: 600 } }]));
+    const stage = Konva.stages.at(-1)!;
+    const group = stage.findOne("Group")!;
+    act(() => {
+      stage.setPointersPositions({ clientX: 380, clientY: 250 });
+      stage.fire("wheel", { evt: { deltaY: -100, preventDefault: vi.fn() } });
+    });
+    const before = group
+      .getAbsoluteTransform()
+      .copy()
+      .invert()
+      .point({ x: 450, y: 300 });
+    const scale = group.scaleX();
+    act(() => measure([{ contentRect: { width: 600, height: 600 } }]));
+    const after = group
+      .getAbsoluteTransform()
+      .copy()
+      .invert()
+      .point({ x: 300, y: 300 });
+    expect(group.scaleX()).toBeCloseTo(scale, 10);
+    expect(after.x).toBeCloseTo(before.x, 10);
+    expect(after.y).toBeCloseTo(before.y, 10);
+    act(() => measure([{ contentRect: { width: 0, height: 0 } }]));
+    expect(stage.width()).toBe(600); // hidden task measurements must not corrupt its view
+    expect(props.onBox).not.toHaveBeenCalled();
+    expect(props.onGeometry).not.toHaveBeenCalled();
+  } finally {
+    vi.stubGlobal("ResizeObserver", originalObserver);
+  }
 });

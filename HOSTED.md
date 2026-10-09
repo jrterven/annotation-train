@@ -300,3 +300,22 @@ check ownership and return `private, no-store`. Export IDs are canonical UUIDs,
 not server paths. COCO calls without options retain the original mixed export
 behavior; the editor requests unique exports so concurrent downloads do not
 replace each other.
+
+
+## Optional Google account picture
+
+The account menu displays the `picture` from verified Google ID-token claims.
+Only HTTPS images on Google-owned `*.googleusercontent.com` hosts are retained;
+invalid or missing pictures use a generic account icon. Browsers request the
+image without a referrer. Existing sessions keep the fallback until the user's
+next Google sign-in; no new OAuth scopes or provider requests are required.
+
+`users.picture` is an optional nullable column added idempotently by
+`Database.create_schema()` at web startup, under the existing PostgreSQL schema
+lock. When rolling out processes independently, run that method with the new CPU
+image and private configuration before starting any new reader. Older readers
+ignore the extra column and existing rows default to NULL. Software rollback to
+v2-compatible releases can retain the column; never drop it while new readers
+run. This change does not alter project SQLite schemas, annotation revisions,
+worker protocols or quota accounting. Backups naturally include the new column;
+restoring a pre-column backup requires schema initialization before new readers.

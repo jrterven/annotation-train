@@ -39,6 +39,8 @@ import {
   Pentagon,
 } from "lucide-react";
 import IconButton from "./IconButton";
+import AccountAvatar from "./AccountAvatar";
+import ResizableWorkspace, { PanelResizeHandle } from "./ResizableWorkspace";
 import {
   api,
   assetURL,
@@ -1260,8 +1262,11 @@ export default function App({
         <div className="header-actions">
           {hosted && (
             <details className="hosted-account">
-              <summary>
-                {hostedSession.user?.name || hostedSession.user?.email}
+              <summary
+                aria-label={`Google account: ${hostedSession.user?.email || "Account"}`}
+                title={hostedSession.user?.name || hostedSession.user?.email}
+              >
+                <AccountAvatar user={hostedSession.user} />
               </summary>
               <div className="hosted-account-menu">
                 <strong>{hostedSession.user?.email}</strong>
@@ -1378,7 +1383,7 @@ export default function App({
         </main>
       ) : (
         <>
-          <div className="workspace">
+          <ResizableWorkspace rightVisible={task === "detection" || inspector}>
             <aside className="image-sidebar">
               <div className="sidebar-heading">
                 <span>Images</span>
@@ -1486,6 +1491,7 @@ export default function App({
                 </div>
               </div>
             </aside>
+            <PanelResizeHandle side="left" />
             {task === "segmentation" && (
               <main className="editor-main">
                 <div className="editor-toolbar">
@@ -1794,6 +1800,9 @@ export default function App({
                   )}
                 </div>
               </main>
+            )}
+            {inspector && task === "segmentation" && (
+              <PanelResizeHandle side="right" />
             )}
             {inspector && task === "segmentation" && (
               <aside className="inspector">
@@ -2282,7 +2291,7 @@ export default function App({
               onError={setToast}
               navigate={(offset) => navigate(imageIndex + offset)}
             />
-          </div>
+          </ResizableWorkspace>
           <footer className="statusbar">
             <div className={`save-status ${failedRecord ? "error" : ""}`}>
               {failedRecord ? (

@@ -302,8 +302,9 @@ def test_cache_recovery_checksum_and_capacity(tmp_path):
         cache.get(objects, "a", "0" * 64)
 
 
+@pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("wrong_claim", [None, "nonce", "aud", "iss", "exp"])
-def test_google_callback_signature_claims_state_and_replay(hosted, monkeypatch, wrong_claim):
+def test_google_callback_signature_claims_state_and_replay(hosted, monkeypatch, wrong_claim, existing):
     settings, db, objects, app, clients = hosted
     client = TestClient(app, base_url=settings.public_url)
     login = client.get("/api/v1/auth/google/login", follow_redirects=False)
@@ -315,7 +316,8 @@ def test_google_callback_signature_claims_state_and_replay(hosted, monkeypatch, 
     # utcnow is naive UTC; timestamp is host-local, so use aware clock for JWT.
     from datetime import datetime, timezone
     now = int(datetime.now(timezone.utc).timestamp())
-    claims = {"iss": "https://accounts.google.com", "aud": settings.google_client_id, "sub": "google-new",
+    claims = {"iss": "https://accounts.google.com", "aud": settings.google_client_id, "sub": "google-alice" if existing else "google-new",
+        "picture": "https://lh3.googleusercontent.com/a/profile",
         "iat": now, "exp": now + 3600, "nonce": params["nonce"][0], "email": "verified@example.invalid", "email_verified": True}
     if wrong_claim:
         claims[wrong_claim] = now - 100 if wrong_claim == "exp" else "wrong"
@@ -342,7 +344,11 @@ def test_google_callback_signature_claims_state_and_replay(hosted, monkeypatch, 
     assert response.status_code == (400 if wrong_claim else 302), response.text
     if not wrong_claim:
         assert "HttpOnly" in response.headers["set-cookie"]
-        assert client.get("/api/v1/auth/session").json()["user"]["email"] == "verified@example.invalid"
+        profile = client.get("/api/v1/auth/session").json()["user"]
+        assert profile["email"] == "verified@example.invalid"
+        assert profile["picture"] == claims["picture"]
+        if existing:
+            assert profile["id"] == "alice"
     assert client.get(callback, follow_redirects=False).status_code == 400
 
 
@@ -558,3 +564,21 @@ def test_native_image_response_preserves_original_bytes_and_exif_pixel_grid(host
         else:
             assert result.headers['content-type'] == 'image/png'
         assert clients['bob'].get(root + f'/images/{n}/file').status_code == 404
+
+
+@pytest.mark.parametrize("value", [None, "", 123, "http://lh3.googleusercontent.com/a", "https://example.com/picture", "https://googleusercontent.com.evil.test/a", "https://lh3.googleusercontent.com:444/a", "https://user@lh3.googleusercontent.com/a", "https://lh3.googleusercontent.com:"+"x/a", "https://[invalid/a", "https://lh3.googleusercontent.com/"+"x"*2048])
+def test_google_picture_rejects_non_google_or_invalid_urls(value):
+    assert auth.google_picture(value) is None
+
+
+def test_existing_account_schema_upgrades_without_changing_sessions_or_quotas(hosted):
+    from sqlalchemy import text
+    _, db, _, _, clients = hosted
+    before = clients["alice"].get("/api/v1/auth/session").json()
+    with db.engine.begin() as connection:
+        connection.execute(text("ALTER TABLE users DROP COLUMN picture"))
+    db.create_schema()
+    db.create_schema()  # repeated startup is safe
+    after = clients["alice"].get("/api/v1/auth/session").json()
+    assert after == before
+    assert after["user"]["picture"] is None

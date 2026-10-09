@@ -23,6 +23,7 @@ class User(Base):
     google_sub: Mapped[str] = mapped_column(String(255), unique=True)
     email: Mapped[str] = mapped_column(String(320))
     name: Mapped[str] = mapped_column(String(255))
+    picture: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     storage_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     reserved_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

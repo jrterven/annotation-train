@@ -211,6 +211,10 @@ Hover over toolbar tools to see their English labels and keyboard shortcuts. Cho
 
 To move around a zoomed image, select **Pan image** (the hand icon next to **Select and edit**) and drag. Switch back to an annotation tool to continue editing. You can also hold **Space** and drag to pan temporarily.
 
+Mouse-wheel and trackpad zoom follow the scroll distance with small, cursor-centered steps. The zoom buttons use 10% steps. Drag the divider beside **Images** or **Objects/Boxes** to resize either panel; widths are remembered in this browser. A focused divider supports arrow keys (Shift for larger steps), Home/End for its limits, and Enter or double-click to reset. Resizing keeps the current canvas scale and center.
+
+In hosted mode, open the account menu from the Google profile avatar. Existing accounts show a fallback icon until their next Google sign-in supplies a profile picture; a missing or failed picture also uses the fallback.
+
 For an irregular region:
 
 1. Select **Polygon** (`G`) and click to add vertices.

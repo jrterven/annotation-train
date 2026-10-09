@@ -30,10 +30,10 @@ export function PublicDocument({ page }: { page: "privacy" | "terms" }) {
           </p>
           <h2>Your account and projects</h2>
           <p>
-            We use Google sign-in to receive your account identifier, name, and
-            email address. We do not receive your Google password or request
-            access to your Google Drive. A necessary session cookie keeps you
-            signed in.
+            We use Google sign-in to receive your account identifier, name,
+            profile picture, and email address. We do not receive your Google
+            password or request access to your Google Drive. A necessary session
+            cookie keeps you signed in.
           </p>
           <p>
             Images, filenames, annotation data, and project settings are stored

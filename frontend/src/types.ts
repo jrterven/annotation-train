@@ -27,7 +27,12 @@ export type HostedProject = Omit<Project, "directory" | "image_root"> & {
   id: string;
 };
 export type HostedSession = {
-  user: { id: string; email: string; name: string } | null;
+  user: {
+    id: string;
+    email: string;
+    name: string;
+    picture?: string | null;
+  } | null;
   csrf_token: string | null;
   usage: {
     storage_bytes: number;
