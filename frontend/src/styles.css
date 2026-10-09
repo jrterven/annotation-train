@@ -124,7 +124,7 @@ kbd {
   gap: 21px;
   border-bottom: 1px solid var(--border);
   background: var(--paper);
-  z-index: 3;
+  z-index: 10;
 }
 .brand {
   display: flex;
