@@ -154,9 +154,21 @@ function MaskOutline({
 export default function CanvasEditor(p: Props) {
   const container = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
-  const [size, setSize] = useState({ width: 800, height: 600 });
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [size, setSize] = useState({
+    width: 800,
+    height: 600,
+    measured: false,
+  });
+  const [{ zoom, pan }, setView] = useState({ zoom: 1, pan: { x: 0, y: 0 } });
+  const setPan = (pan: { x: number; y: number }) =>
+    setView((view) => ({ ...view, pan }));
+  const previousViewport = useRef<{
+    image: number;
+    width: number;
+    height: number;
+    fit: number;
+    measured: boolean;
+  } | null>(null);
   const [space, setSpace] = useState(false);
   const [dragPan, setDragPan] = useState<{
     x: number;
@@ -194,10 +206,12 @@ export default function CanvasEditor(p: Props) {
   );
   const geometry = edit || baseGeometry;
   const fitView = () => {
-    setZoom(1);
-    setPan({
-      x: (size.width - p.image.width * fit) / 2,
-      y: (size.height - p.image.height * fit) / 2,
+    setView({
+      zoom: 1,
+      pan: {
+        x: (size.width - p.image.width * fit) / 2,
+        y: (size.height - p.image.height * fit) / 2,
+      },
     });
   };
   p.fitRef.current = fitView;
@@ -205,16 +219,36 @@ export default function CanvasEditor(p: Props) {
     if (!container.current) return;
     const observer = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect;
-      setSize({ width, height });
+      if (width > 0 && height > 0) setSize({ width, height, measured: true });
     });
     observer.observe(container.current);
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
-    fitView();
-    setEdit(null);
-    setBox(null);
-  }, [p.image.id, size.width, size.height]);
+    const previous = previousViewport.current;
+    if (!previous || previous.image !== p.image.id || !previous.measured) {
+      fitView();
+      setEdit(null);
+      setBox(null);
+    } else {
+      // Resizing a panel keeps the same original pixel under the canvas center.
+      setView((view) => {
+        const next = Math.max(
+          0.1,
+          Math.min(16, (view.zoom * previous.fit) / fit),
+        );
+        const ratio = (fit * next) / (previous.fit * view.zoom);
+        return {
+          zoom: next,
+          pan: {
+            x: size.width / 2 - (previous.width / 2 - view.pan.x) * ratio,
+            y: size.height / 2 - (previous.height / 2 - view.pan.y) * ratio,
+          },
+        };
+      });
+    }
+    previousViewport.current = { image: p.image.id, ...size, fit };
+  }, [p.image.id, size.width, size.height, size.measured]);
   useEffect(() => {
     setEdit(null);
   }, [p.selected, baseGeometry]);
@@ -259,17 +293,22 @@ export default function CanvasEditor(p: Props) {
     Math.min(p.image.width, Math.max(0, at[0])),
     Math.min(p.image.height, Math.max(0, at[1])),
   ];
-  function zoomTo(
-    next: number,
+  function zoomBy(
+    factor: number,
     anchor = { x: size.width / 2, y: size.height / 2 },
   ) {
-    next = Math.max(0.1, Math.min(16, next));
-    const ratio = next / zoom;
-    setPan({
-      x: anchor.x - (anchor.x - pan.x) * ratio,
-      y: anchor.y - (anchor.y - pan.y) * ratio,
+    // Functional updates accumulate wheel events delivered in the same frame.
+    setView((view) => {
+      const next = Math.max(0.1, Math.min(16, view.zoom * factor));
+      const ratio = next / view.zoom;
+      return {
+        zoom: next,
+        pan: {
+          x: anchor.x - (anchor.x - view.pan.x) * ratio,
+          y: anchor.y - (anchor.y - view.pan.y) * ratio,
+        },
+      };
     });
-    setZoom(next);
   }
   function down(e: Konva.KonvaEventObject<MouseEvent>) {
     const raw = stageRef.current?.getPointerPosition();
@@ -427,7 +466,15 @@ export default function CanvasEditor(p: Props) {
         onWheel={(e) => {
           e.evt.preventDefault();
           const pointer = stageRef.current?.getPointerPosition();
-          zoomTo(zoom * (e.evt.deltaY > 0 ? 0.9 : 1.1), pointer || undefined);
+          const unit =
+            e.evt.deltaMode === 1
+              ? 16
+              : e.evt.deltaMode === 2
+                ? size.height
+                : 1;
+          const delta = Math.max(-100, Math.min(100, e.evt.deltaY * unit));
+          // Small trackpad deltas remain small; large wheel notches are capped.
+          zoomBy(Math.exp(-delta * 0.0008), pointer || undefined);
         }}
       >
         <Layer>
@@ -800,7 +847,7 @@ export default function CanvasEditor(p: Props) {
       </div>
       <div className="zoom-controls">
         <button
-          onClick={() => zoomTo(zoom / 0.8)}
+          onClick={() => zoomBy(1.1)}
           title="Zoom in"
           aria-label="Zoom in"
         >
@@ -808,7 +855,7 @@ export default function CanvasEditor(p: Props) {
         </button>
         <span>{Math.round(scale * 100)}%</span>
         <button
-          onClick={() => zoomTo(zoom * 0.8)}
+          onClick={() => zoomBy(1 / 1.1)}
           title="Zoom out"
           aria-label="Zoom out"
         >

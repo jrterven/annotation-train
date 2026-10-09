@@ -26,9 +26,10 @@ class Database:
             if self.engine.dialect.name == "postgresql":
                 connection.execute(text("SELECT pg_advisory_xact_lock(724162603)"))
             Base.metadata.create_all(connection)
-            # Additive v1 quota migration; existing data is accounted lazily
-            # under the same project/global locks before it is exposed again.
+            # Additive migrations; nullable account fields also support older readers.
+            # Existing project data is accounted lazily under project/global locks.
             additions = {
+                "users": {"picture": "VARCHAR(2048)"},
                 "projects": {"metadata_bytes": "BIGINT NOT NULL DEFAULT 0", "quota_version": "INTEGER NOT NULL DEFAULT 0",
                              "pending_mutation_id": "VARCHAR(36)"},
                 "upload_reservations": {"file_name": "VARCHAR(1024)"},

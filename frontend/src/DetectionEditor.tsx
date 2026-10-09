@@ -33,6 +33,7 @@ import {
   acceptCandidates,
 } from "./editorController";
 import ClassPanel from "./ClassPanel";
+import { PanelResizeHandle } from "./ResizableWorkspace";
 import { maskBounds } from "./masks";
 import { xywh, xyxy } from "./boxes";
 import CanvasEditor from "./CanvasEditor";
@@ -588,6 +589,7 @@ export default function DetectionEditor(p: Props) {
           )}
         </div>
       </main>
+      {p.active && <PanelResizeHandle side="right" />}
       <aside
         className="inspector detection-inspector"
         style={{ display: p.active ? undefined : "none" }}

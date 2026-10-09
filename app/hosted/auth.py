@@ -2,7 +2,7 @@
 from datetime import timedelta
 import hashlib
 import secrets
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from authlib.jose import JsonWebToken
@@ -17,6 +17,24 @@ from .models import AuthFlow, AuthSession, InferenceUsage, Project, User, identi
 COOKIE = "annotation_session"
 FLOW_COOKIE = "annotation_oauth"
 router = APIRouter(prefix="/api/v1/auth")
+
+
+def google_picture(value):
+    """Keep only Google's HTTPS profile images, never arbitrary remote content."""
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    # Browsers treat backslashes as path separators in HTTPS URLs, unlike
+    # urlsplit. Reject ambiguous input before checking the allowed hostname.
+    if "\\" in value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        return None
+    try:
+        url = urlsplit(value)
+        if (url.scheme == "https" and url.hostname and url.hostname.endswith(".googleusercontent.com")
+                and url.port in (None, 443) and not url.username and not url.password):
+            return value
+    except ValueError:
+        pass
+    return None
 
 
 def digest(value):
@@ -55,7 +73,7 @@ def current_session(request: Request):
     with db.session() as session:
         user = session.get(User, user_id)
         usage = session.get(InferenceUsage, (user_id, utcnow().date().isoformat()))
-        return {"user": {"id": user.id, "email": user.email, "name": user.name},
+        return {"user": {"id": user.id, "email": user.email, "name": user.name, "picture": google_picture(user.picture)},
                 "csrf_token": request.state.csrf_token,
                 "usage": {"storage_bytes": user.storage_bytes,
                           "storage_limit_bytes": settings.storage_limit_bytes,
@@ -129,6 +147,7 @@ async def google_callback(request: Request):
             session.add(user)
         else:
             user.email, user.name = claims["email"], claims.get("name", claims["email"])
+        user.picture = google_picture(claims.get("picture"))
         user_id = user.id
         old = session.get(AuthSession, digest(request.cookies.get(COOKIE, "")))
         if old:

@@ -288,3 +288,22 @@ def test_export_revoked_during_upload_is_discarded_without_quota_changes(export_
     assert not list(objects.list('exports/'))
     assert not list(settings.data_dir.glob('coco-*'))
     assert_accounted(settings, db)
+
+
+def test_concurrent_account_picture_migration_preserves_legacy_readers(postgres):
+    db, _ = postgres
+    with db.engine.begin() as connection:
+        connection.execute(text("ALTER TABLE users DROP COLUMN picture"))
+    # Independent web processes can start against the same pre-upgrade schema.
+    assert race([db.create_schema for _ in range(4)]) == [None] * 4
+    with db.session() as session:
+        users = list(session.scalars(select(User).order_by(User.id)))
+        assert [user.id for user in users] == ["alice", "bob"]
+        assert all(user.picture is None and user.storage_bytes == 0 and user.reserved_bytes == 0 for user in users)
+        users[0].picture = "https://lh3.googleusercontent.com/a/profile"
+    # Old software continues selecting/updating only the fields it understands.
+    with db.engine.begin() as connection:
+        connection.execute(text("UPDATE users SET name='Updated' WHERE id='alice'"))
+        assert connection.execute(text("SELECT email FROM users WHERE id='alice'")).scalar_one() == "alice@invalid.test"
+    with db.session() as session:
+        assert session.get(User, "alice").picture == "https://lh3.googleusercontent.com/a/profile"
