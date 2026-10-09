@@ -104,6 +104,41 @@ describe("durable workspace state", () => {
     expect(result.current.get(1)?.draft?.id).toBe("keep-me");
     expect(onError).toHaveBeenCalled();
   });
+  it("includes both tasks and pending work in a detached recovery snapshot", async () => {
+    request.mockResolvedValueOnce(structuredClone(initial));
+    const { result } = renderHook(() => useWorkspace(vi.fn()));
+    await act(async () => {
+      await result.current.load(1);
+    });
+    act(() => {
+      result.current.update(1, (s) => edited(s, "polygon-draft"));
+      result.current.updateDetection(1, (s) => ({
+        ...s,
+        annotations: [
+          {
+            id: "box",
+            kind: "bbox",
+            category_id: 0,
+            iscrowd: 0,
+            bbox: [1, 2, 3, 4],
+          },
+        ],
+        draft: {
+          id: "box-draft",
+          category_id: 0,
+          bbox: [2, 3, 4, 5],
+          points: [],
+        },
+      }));
+    });
+    const snapshot = result.current.snapshot(1)!;
+    expect(snapshot.schema_version).toBe(2);
+    expect(snapshot.draft?.id).toBe("polygon-draft");
+    expect(snapshot.annotations[0].id).toBe("box");
+    expect(snapshot.detection?.draft?.id).toBe("box-draft");
+    snapshot.annotations.length = 0;
+    expect(result.current.getDetection(1)?.annotations).toHaveLength(1);
+  });
   it("ignores an old project read after switching projects even when image IDs match", async () => {
     const oldRead = deferred<ImageState>();
     request.mockReturnValueOnce(oldRead.promise);
@@ -152,4 +187,16 @@ describe("durable workspace state", () => {
     expect(result.current.get(1)?.draft?.id).toBe("object");
     expect(result.current.get(1)?.revision).toBe(7);
   });
+});
+
+it("cancels queued autosaves on unmount so a previous editor cannot write into the next session", async () => {
+  request.mockResolvedValue(structuredClone(initial));
+  const { result, unmount } = renderHook(() => useWorkspace(vi.fn()));
+  await act(async () => {
+    await result.current.load(1);
+  });
+  act(() => result.current.update(1, (s) => edited(s, "old-session")));
+  unmount();
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  expect(request.mock.calls.filter((c) => c[1] === "PUT")).toHaveLength(0);
 });

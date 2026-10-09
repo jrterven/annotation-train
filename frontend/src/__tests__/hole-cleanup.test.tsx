@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { api, ApiError } from "../api";
 import type {
-  Annotation,
+  SegmentationAnnotation as Annotation,
   Component,
   GeometryResult,
   ImageState,

@@ -57,6 +57,22 @@ def target_for(value):
     return target, value.root / "restored-data"
 
 
+def seed_mixed_annotations(value):
+    import numpy as np
+    from app.geometry import mask_payload
+    from app.hosted.quota import mutate_project
+    mask = np.zeros((6, 8), dtype=bool)
+    mask[1:5, 2:6] = True
+    state = value.store.get_state(1)
+    state.update(schema_version=2, annotations=[
+        {"id": "manual-box", "kind": "bbox", "category_id": 1, "iscrowd": 0, "bbox": [1, 1, 5, 4]},
+        {"id": "exact-mask", "category_id": 1, "iscrowd": 0, **mask_payload(mask)}],
+        detection={"draft": {"id": "box-draft", "category_id": 1, "bbox": [0, 0, 2, 2], "points": []},
+                   "proposals": [], "adjustment": None})
+    return mutate_project(value.settings, value.db, value.objects, value.pid, value.uid,
+                          lambda store, *_: store.save_state(1, state))
+
+
 def age(objects, key, when):
     timestamp = when.replace(tzinfo=timezone.utc).timestamp()
     os.utime(objects._path(key), (timestamp, timestamp))
@@ -64,6 +80,7 @@ def age(objects, key, when):
 
 def test_backup_restore_consistent_projects_images_and_metadata(setup):
     value = setup
+    mixed_state = seed_mixed_annotations(value)
     job = enqueue(value.db, value.settings, value.uid, value.pid, 1, "text", {"text": "carrot"})
     key = backup(value.settings, value.db, value.objects)
     manifest = load_manifest(value.settings, value.objects, key)
@@ -81,7 +98,9 @@ def test_backup_restore_consistent_projects_images_and_metadata(setup):
         assert session.get(Job, job["id"]).status == "failed"
         usage = session.scalar(select(InferenceUsage))
         assert usage.reserved == 0 and usage.used == 0
-    project = project_store(replace(value.settings, data_dir=target), value.pid).project()
+    restored_store = project_store(replace(value.settings, data_dir=target), value.pid)
+    assert restored_store.get_state(1) == mixed_state
+    project = restored_store.project()
     assert [item["name"] for item in project["categories"]] == ["Carrot"]
     assert project["images"][0]["file_name"] == "carrot.png"
 
@@ -395,6 +414,7 @@ def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
     dsn_file = os.environ.get("ANNOTATION_TEST_POSTGRES_URL_FILE")
     if not dsn_file:
         pytest.skip("No isolated PostgreSQL test connection configured")
+    mixed_state = seed_mixed_annotations(setup)
     url = make_url(Path(dsn_file).read_text().strip())
     admin = create_engine(url, isolation_level="AUTOCOMMIT")
     names = ["annotation_maintenance_" + uuid4().hex for _ in range(2)]
@@ -442,7 +462,9 @@ def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
             assert session.get(Project, setup.pid).name == "Carrots updated"
             assert session.get(User, setup.uid).email == "owner@example.test"
             assert session.get(AuthSession, "old-session") is None
-        project = project_store(replace(settings, data_dir=destination_dir), setup.pid).project()
+        restored_store = project_store(replace(settings, data_dir=destination_dir), setup.pid)
+        assert restored_store.get_state(1) == mixed_state
+        project = restored_store.project()
         assert project["name"] == "Carrots updated"
         assert [item["name"] for item in project["categories"]] == ["Carrot", "Committed before snapshot"]
         assert project["images"][0]["file_name"] == "carrot.png"

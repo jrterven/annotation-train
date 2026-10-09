@@ -43,8 +43,9 @@ The PostgreSQL job runs separately against an ephemeral PostgreSQL 15 service.
 DSN for the backup/restore check. This test creates and drops disposable
 databases. Never configure either variable with a production connection.
 
-The six PostgreSQL checks are expected skips when those explicit variables are
-absent locally. In CI they must all execute. Real GPU/model validation remains a
+The PostgreSQL checks are expected skips when those explicit variables are
+absent locally. In CI they must all execute, including the export concurrency
+checks that also run locally against disposable SQLite metadata. Real GPU/model validation remains a
 separate release check, documented in `VALIDATION.md` and the private runbook.
 
 CI also builds the hosted Docker image and verifies that it imports without

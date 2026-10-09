@@ -24,6 +24,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .geometry import decode_mask, fill_small_holes, mask_payload, rasterize_components, union_masks
 from .inference import Sam3Engine
 from .storage import ProjectStore, RevisionConflict
+from . import yolo
 from .translation import PromptTranslator, TranslationUnavailable
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -77,7 +78,7 @@ app = FastAPI(title="Annotation and Training", version="0.1.0")
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 app.add_middleware(VisualUploadLimitMiddleware)
 ORIGINS = {"http://localhost:8765", "http://127.0.0.1:8765", "http://localhost:5173", "http://127.0.0.1:5173"}
-app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST", "PUT", "PATCH"], allow_headers=["Content-Type", "X-Requested-With", "X-Project-Directory"])
+app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST", "PUT", "PATCH"], allow_headers=["Content-Type", "X-Requested-With", "X-Project-Directory", "X-Annotation-State-Version"])
 engine = Sam3Engine()
 translator = PromptTranslator()
 _store: ProjectStore | None = None
@@ -330,12 +331,12 @@ def get_image(image_id: int, request: Request, thumbnail: bool = False):
 
 @app.get("/api/images/{image_id}/state")
 def get_state(image_id: int, request: Request):
-    return store(request).get_state(image_id)
+    return store(request).get_state(image_id, client_version=request.headers.get("x-annotation-state-version"))
 
 
 @app.put("/api/images/{image_id}/state")
 def save_state(image_id: int, body: dict[str, Any], request: Request):
-    return store(request).save_state(image_id, body)
+    return store(request).save_state(image_id, body, client_version=request.headers.get("x-annotation-state-version"))
 
 
 @app.post("/api/geometry")
@@ -464,10 +465,40 @@ def import_coco(body: ImportInput):
         return result
 
 
+@app.post("/api/yolo/preview")
+def preview_yolo(body: yolo.ExportOptions, request: Request):
+    return yolo.prepare(store(request), body)
+
+
+@app.post("/api/yolo/export")
+def export_yolo(body: yolo.ExportRequest, request: Request):
+    project = store(request)
+    export_id, path = yolo.generate(project, body, project.directory / "exports", project.image_path)
+    return {"export_id": export_id, "file_name": f"annotations-{body.task}.zip", "path": str(path)}
+
+
+@app.get("/api/yolo/download/{export_id}")
+def download_yolo(export_id: str, request: Request):
+    path = store(request).directory / "exports" / f"{yolo.export_identity(export_id)}.zip"
+    if not path.is_file():
+        raise FileNotFoundError("Export not found")
+    return FileResponse(path, media_type="application/zip", filename="annotations-yolo.zip")
+
+
 @app.post("/api/coco/export")
-def export_coco(request: Request):
-    path = store(request).export_coco()
+def export_coco(request: Request, body: yolo.CocoOptions = yolo.CocoOptions()):
+    path = store(request).export_coco(body.task, unique=body.unique)
+    if body.unique:
+        return {"path": str(path), "file_name": "annotations.coco.json", "export_id": path.stem}
     return {"path": str(path), "file_name": path.name}
+
+
+@app.get("/api/coco/download/{export_id}")
+def download_coco_export(export_id: str, request: Request):
+    path = store(request).directory / "exports" / f"{yolo.export_identity(export_id)}.json"
+    if not path.is_file():
+        raise FileNotFoundError("Export not found")
+    return FileResponse(path, media_type="application/json", filename="annotations.coco.json")
 
 
 @app.get("/api/coco/download")

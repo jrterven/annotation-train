@@ -2058,3 +2058,100 @@ kbd {
     flex-wrap: wrap;
   }
 }
+
+.task-selector {
+  display: flex;
+  gap: 3px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-left: 18px;
+}
+.task-selector button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.task-selector button[aria-pressed="true"] {
+  background: var(--green);
+  color: white;
+  box-shadow: 0 1px 3px #0002;
+}
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.checkbox-label input[type="checkbox"],
+.box-proposal-row input {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  accent-color: var(--green);
+}
+.mask-box-toggle {
+  padding: 12px 18px 0;
+}
+.detection-class {
+  max-width: 140px;
+  padding: 6px;
+}
+.detection-section {
+  padding: 15px;
+  border-bottom: 1px solid var(--border);
+}
+.detection-section h3 {
+  font-size: 12px;
+  margin-top: 0;
+}
+.box-proposal-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+}
+.box-proposal-row .text-button {
+  flex: 1;
+  text-align: left;
+}
+.export-modal {
+  width: min(560px, 94vw);
+}
+.export-fields {
+  display: grid;
+  gap: 14px;
+  padding: 0 24px 20px;
+}
+.export-fields > label {
+  font-size: 13px;
+}
+.export-fields select {
+  margin-top: 5px;
+}
+.export-preview {
+  padding: 12px;
+  background: var(--surface);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.export-preview ul {
+  max-height: 180px;
+  overflow: auto;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1100px) {
+  .task-selector button span {
+    display: none;
+  }
+  .task-selector {
+    margin-left: 8px;
+  }
+}

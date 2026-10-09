@@ -1,4 +1,4 @@
-import type { Mask } from "./types";
+import type { Mask, BBox } from "./types";
 // COCO compressed RLE, column-major. Keep pixel masks exact; contours are editing controls.
 export function decodeCounts(encoded: string): number[] {
   const counts: number[] = [];
@@ -44,7 +44,7 @@ export function maskContains(mask: Mask, x: number, y: number): boolean {
 }
 // Keep every original pixel, but allocate only the occupied rectangle. A small
 // object on an orthophoto must not require a full-image RGBA canvas per mask.
-export function maskRaster(mask: Mask, color: string) {
+export function maskBounds(mask: Mask): BBox | null {
   const [h, w] = mask.size;
   if (![h, w, h * w].every(Number.isSafeInteger) || h <= 0 || w <= 0)
     throw new Error("Invalid RLE dimensions");
@@ -71,7 +71,13 @@ export function maskRaster(mask: Mask, color: string) {
     offset += count;
   }
   if (offset !== w * h) throw new Error("Incomplete RLE dimensions");
-  if (right < left)
+  return right < left ? null : [left, top, right - left + 1, bottom - top + 1];
+}
+export function maskRaster(mask: Mask, color: string) {
+  const [h] = mask.size;
+  const counts = decodeCounts(mask.counts);
+  const bounds = maskBounds(mask);
+  if (!bounds)
     return {
       x: 0,
       y: 0,
@@ -79,6 +85,10 @@ export function maskRaster(mask: Mask, color: string) {
       height: 1,
       pixels: new Uint8ClampedArray(4),
     };
+  const [left, top, boxWidth, boxHeight] = bounds;
+  const right = left + boxWidth - 1,
+    bottom = top + boxHeight - 1;
+  let offset = 0;
   const width = right - left + 1,
     height = bottom - top + 1;
   const pixels = new Uint8ClampedArray(width * height * 4);

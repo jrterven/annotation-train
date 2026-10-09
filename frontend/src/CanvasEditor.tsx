@@ -11,7 +11,7 @@ import {
 import type Konva from "konva";
 import { Focus, Minus, Plus, ScanLine } from "lucide-react";
 import type {
-  Annotation,
+  SegmentationAnnotation as Annotation,
   Category,
   Component,
   Draft,
@@ -20,10 +20,14 @@ import type {
   SourceImage,
   Tool,
   XY,
+  BBox,
+  BoxAnnotation,
 } from "./types";
-import { maskContains, maskOverlay } from "./masks";
+import { maskContains, maskOverlay, maskBounds } from "./masks";
 import { assetURL } from "./api";
 import { sourceImages } from "./imageCache";
+import BoxShape from "./BoxShape";
+import { boxContains, unionBoxes } from "./boxes";
 export type Vertex = { component: number; ring: number; index: number };
 type Props = {
   image: SourceImage;
@@ -34,6 +38,11 @@ type Props = {
   selected: string | null;
   tool: Tool;
   showMasks: boolean;
+  showBoxes?: boolean;
+  boxes?: BoxAnnotation[];
+  pendingBoxIds?: string[];
+  boxPreview?: BBox;
+  onBoxGeometry?: (id: string, box: BBox) => void;
   opacity: number;
   vertex: Vertex | null;
   busy: boolean;
@@ -210,6 +219,9 @@ export default function CanvasEditor(p: Props) {
     setEdit(null);
   }, [p.selected, baseGeometry]);
   useEffect(() => {
+    setBox(null);
+  }, [p.tool]);
+  useEffect(() => {
     setPolygonEdit(null);
     setHover(null);
   }, [p.image.id, activePart?.id, JSON.stringify(activePolygon), p.tool]);
@@ -300,6 +312,11 @@ export default function CanvasEditor(p: Props) {
     }
     if (p.tool === "positive" || p.tool === "negative") {
       p.onPoint(at, p.tool === "negative" || e.evt.button === 2);
+      return;
+    }
+    if (p.boxes) {
+      const box = [...p.boxes].reverse().find((a) => boxContains(a.bbox, at));
+      p.onSelect(box?.id || null);
       return;
     }
     const proposal = [...p.proposals]
@@ -430,6 +447,78 @@ export default function CanvasEditor(p: Props) {
               height={p.image.height}
               listening={false}
             />
+            {p.boxes?.map((a) => (
+              <BoxShape
+                key={a.id}
+                bbox={a.bbox}
+                color={
+                  p.categories.find((c) => c.id === a.category_id)?.color ||
+                  "#38bdf8"
+                }
+                scale={scale}
+                width={p.image.width}
+                height={p.image.height}
+                selected={p.selected === a.id}
+                editable={!p.busy && !panning && p.tool === "select"}
+                dashed={p.pendingBoxIds?.includes(a.id)}
+                onSelect={
+                  !panning && p.tool === "select"
+                    ? () => p.onSelect(a.id)
+                    : undefined
+                }
+                onChange={(box) => p.onBoxGeometry?.(a.id, box)}
+              />
+            ))}
+            {p.boxPreview && (
+              <BoxShape
+                bbox={p.boxPreview}
+                color="#22c55e"
+                scale={scale}
+                width={p.image.width}
+                height={p.image.height}
+                dashed
+              />
+            )}
+            {p.showBoxes &&
+              [...p.annotations, ...p.proposals].map((a) => {
+                const bounds = maskBounds(a.mask);
+                return (
+                  bounds && (
+                    <BoxShape
+                      key={`bounds-${a.id}`}
+                      bbox={bounds}
+                      color={
+                        p.categories.find((c) => c.id === a.category_id)
+                          ?.color || "#38bdf8"
+                      }
+                      scale={scale}
+                      width={p.image.width}
+                      height={p.image.height}
+                    />
+                  )
+                );
+              })}
+            {p.showBoxes &&
+              (() => {
+                const bounds = unionBoxes(
+                  (p.draft?.parts || []).flatMap((part) => {
+                    const box = part.mask && maskBounds(part.mask);
+                    return box ? [box] : [];
+                  }),
+                );
+                return (
+                  bounds && (
+                    <BoxShape
+                      bbox={bounds}
+                      color="#faf8ed"
+                      scale={scale}
+                      width={p.image.width}
+                      height={p.image.height}
+                      dashed
+                    />
+                  )
+                );
+              })()}
             {p.showMasks &&
               p.annotations.map((a) => {
                 const color =

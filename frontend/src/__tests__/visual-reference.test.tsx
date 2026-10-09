@@ -15,7 +15,7 @@ import VisualReference, {
 } from "../VisualReference";
 import { api } from "../api";
 import type {
-  Annotation,
+  SegmentationAnnotation as Annotation,
   Draft,
   ImageState,
   Project,

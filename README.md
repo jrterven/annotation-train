@@ -1,6 +1,6 @@
 # Annotation and Training
 
-A web application for image instance segmentation with **SAM 3**, with local and hosted execution modes sharing the same editor. Annotate with text, visual examples (experimental), positive/negative clicks, boxes, or an approximate polygon; refine masks, edit vertices, and import/export COCO. The interface is in English. In local mode, images, prompts, and annotations are processed on your machine.
+A web application for image segmentation and bounding-box detection with optional **SAM 3** assistance, with local and hosted execution modes sharing the same editor. Annotate manually or with text, visual examples (experimental), positive/negative clicks and boxes; refine masks, edit geometry, import/export COCO and export YOLO. The interface is in English. In local mode, images, prompts, and annotations are processed on your machine.
 
 Built with React, TypeScript, React Konva, FastAPI, PyTorch, and SQLite.
 
@@ -13,8 +13,8 @@ The separate hosted entry point adds Google sign-in, private browser-uploaded
 projects, Cloudflare R2 storage, PostgreSQL accounts and quotas, and a durable
 queue for remote SAM 3 workers. `run.py` still starts the original local app
 without Google, R2, or PostgreSQL. See [HOSTED.md](HOSTED.md) for configuration,
-deployment, backup/restore, and the release checks. Hosted mode does not add
-training or YOLO features.
+deployment, backup/restore, and the release checks. Both modes support the same
+annotation tasks and exports. Model training is outside this application.
 
 ## Screenshots
 
@@ -295,3 +295,69 @@ For development, run `.venv/bin/python run.py --dev --no-browser` and start `npm
 Real SAM 3 checks require authorized weights and are separate from unit tests. Run `.venv/bin/python scripts/benchmark_sam3.py --help` to benchmark your own images. Mocked responses are not evidence of model quality. See [API_CONTRACT.md](API_CONTRACT.md) for the API and [VALIDATION.md](VALIDATION.md) for validation details.
 
 Dependencies are pinned in `requirements.txt`, `constraints.txt`, and `frontend/package-lock.json`. This repository contains integration code, not model weights. SAM 3 is subject to [Meta's model license](https://github.com/facebookresearch/sam3/blob/main/LICENSE).
+
+### Annotation tasks and manual tools
+
+Use the **Segmentation / Detection** buttons to switch tasks within a project.
+Only the active task is displayed. Confirmed annotations, drafts, proposals and
+undo histories stay separate; image revisions and saving remain shared.
+Segmentation is selected initially. **Show bounding boxes** is off by default
+and draws exact mask bounds without changing annotations or mask visibility.
+
+In **Detection**, **B** draws a manual box. Move it or drag its handles, then
+press Enter or **Confirm box**. Manual annotation does not need SAM. With SAM
+loaded/available, press **S** or the adjacent **Adjust box with SAM** button to
+refine the selected confirmed box or current draft. Review the green adjustment
+and choose **Accept adjustment** or **Keep original box**. Acceptance updates the
+same object and can be undone in one step. Ctrl/Cmd+S still saves. Text, visual
+references and positive/negative points also produce box candidates; only
+confirmed/accepted boxes are exported. Confirmed detections never store a mask.
+
+For manual **Segmentation**, close a polygon and choose **Use polygon**, then
+confirm it. This works in both local and hosted modes without SAM. **Refine with
+SAM** is optional. Masks retain original resolution and exact RLE persistence.
+
+### COCO and YOLO exports
+
+**Export…** chooses format and task (initially the active task). COCO supports
+segmentations, native boxes, or the complete mixed project. Boxes contain COCO
+`bbox` in original-pixel `xywh` coordinates, rectangular `area`, and no invented
+segmentation. COCO import also accepts boxes and mixed datasets.
+
+YOLO export first shows a review of confirmed annotations. Detection rows are
+`class cx cy width height`; segmentation rows are `class x1 y1 ... xn yn`, with
+coordinates normalized by original image dimensions, following the official
+[detection](https://docs.ultralytics.com/datasets/detect/) and
+[segmentation](https://docs.ultralytics.com/datasets/segment/) formats. Class IDs map to consecutive
+indices ordered by category ID; `classes.json` and `report.json` record the map.
+A ZIP contains `labels/`, classes, report and usage instructions. **Include images**
+adds lossless RGB PNGs in the original pixel grid without EXIF rotation. Labels-only
+exports require matching images with the same relative stems and pixel grid.
+
+YOLO uses one polygon per instance. Export fills holes and connects disconnected
+parts with retraced bridges between nearby boundary vertices. Review and accept
+these approximations before exporting; the source masks remain unchanged. COCO
+RLE is the lossless mask interchange format. Crowd annotations and filename
+collisions block YOLO export and identify the affected records. Empty images
+are excluded unless requested explicitly; empty labels do not imply review.
+Create disjoint train/validation splits yourself before training.
+
+Exports use independent download IDs. Hosted exports remain authenticated,
+private and subject to the existing 24-hour cleanup. An export is rejected if
+images, categories, options or annotation revisions changed since its review.
+No YOLO import, keypoint tools or automatic dataset splitting is included.
+
+### Project format v2
+
+The new editor writes annotation state v2 on first save. Existing segmentation
+projects remain readable; migration preserves exact masks and COCO IDs. Boxes
+use `kind: "bbox"`; absent `kind` remains legacy segmentation. The existing
+`draft`/`proposals` fields belong to segmentation; `detection` stores its separate
+draft, proposals and pending adjustment. Confirmed boxes share `annotations` and
+the image revision with masks. Undo histories are task-local and session-only.
+
+State clients send `X-Annotation-State-Version: 2` and `schema_version: 2` on
+writes. After migration, old state clients are rejected with an update message
+instead of being allowed to drop unsupported data. Keep a backup before upgrading;
+older application versions cannot open v2 projects. See [HOSTED.md](HOSTED.md) for
+rollout and recovery requirements.

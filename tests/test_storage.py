@@ -347,7 +347,7 @@ def test_uncompressed_rle_import(tmp_path):
     assert len(state["annotations"][0]["components"][0]["outer"]) == 4
 
 
-@pytest.mark.parametrize("corruption", ["duplicate_id", "missing_image", "bad_size", "bad_category", "bbox_only", "bad_rle", "path_escape"])
+@pytest.mark.parametrize("corruption", ["duplicate_id", "missing_image", "bad_size", "bad_category", "invalid_bbox", "bad_rle", "path_escape"])
 def test_invalid_import_never_creates_partial_project(tmp_path, corruption):
     root, source_path, source = make_coco(tmp_path)
     if corruption == "duplicate_id":
@@ -358,8 +358,9 @@ def test_invalid_import_never_creates_partial_project(tmp_path, corruption):
         source["images"][0]["width"] = 11
     elif corruption == "bad_category":
         source["annotations"][0]["category_id"] = 99
-    elif corruption == "bbox_only":
+    elif corruption == "invalid_bbox":
         del source["annotations"][0]["segmentation"]
+        source["annotations"][0]["bbox"] = [0, 0, 0, 2]
     elif corruption == "bad_rle":
         source["annotations"][0]["segmentation"] = {"size": [8, 12], "counts": [100]}
     elif corruption == "path_escape":
