@@ -1461,8 +1461,10 @@ export default function App({
                   {},
                 );
                 if (session !== sessionToken.current) return;
-                for (const id of result.image_ids)
+                for (const id of result.image_ids) {
+                  if (session !== sessionToken.current) return;
                   await workspace.load(id, true);
+                }
                 if (session !== sessionToken.current) return;
                 setTrainingVisible(false);
                 if (result.image_ids.length)

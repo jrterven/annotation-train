@@ -396,3 +396,86 @@ def test_disabled_training_and_csrf_remain_closed(hosted):
     assert client.post(base + "/compute/pair").status_code == 403
     client.headers["X-CSRF-Token"] = token
     assert clients["bob"].post(base + "/compute/pair").status_code == 404
+
+
+@pytest.mark.parametrize("task", ["detection", "segmentation"])
+def test_compact_split_preview_binds_creation_to_the_approved_data(environment, task):
+    env = environment
+    _, dataset, *_ = prepare(env, task=task)
+    client, root = env["client"], env["root"]
+    base = root + "/training"
+    options = {"task": task, "test_percent": 10}
+    preview = ok(client.post(base + "/datasets/preview?summary_only=true", json=options))
+    assert "images" not in preview and "annotations" not in json.dumps(preview)
+    assert preview["counts"] == dataset["counts"]
+    approved = {**options, "expected_fingerprint": preview["fingerprint"]}
+    created = ok(client.post(base + "/datasets?summary_only=true", json=approved), 201)
+    assert "images" not in created and created["id"] == dataset["id"]
+    assert ok(client.get(base + "/datasets/" + created["id"])) == dataset
+
+    # Same images/counts and re-reviewed content, but a different confirmed generation.
+    state = ok(client.get(root + "/images/1/state"))
+    annotation = next(
+        a for a in state["annotations"] if (a.get("kind") == "bbox") == (task == "detection")
+    )
+    annotation["iscrowd"] = 1
+    saved = ok(client.put(root + "/images/1/state", json=state))
+    ok(client.post(base + "/reviews", json={"task": task, "images": {1: saved["revision"]}}))
+    rejected = client.post(base + "/datasets?summary_only=true", json=approved)
+    assert rejected.status_code == 409 and "Preview" in rejected.json()["detail"]
+    assert len(ok(client.get(base, params={"task": task}))["datasets"]) == 1
+    refreshed = ok(client.post(base + "/datasets/preview?summary_only=true", json=options))
+    assert refreshed["fingerprint"] != preview["fingerprint"]
+    assert refreshed["counts"] == preview["counts"]
+    updated = ok(
+        client.post(base + "/datasets?summary_only=true", json={
+            **options, "expected_fingerprint": refreshed["fingerprint"],
+        }), 201,
+    )
+    assert updated["id"] != dataset["id"]
+    assert updated["fingerprint"] == refreshed["fingerprint"]
+
+
+@pytest.mark.parametrize("environment", ["hosted"], indirect=True)
+def test_training_artifact_reserves_quota_before_any_bytes_are_uploaded(environment):
+    env = environment
+    agent, _, _, assigned = prepare(env)
+    _, db, _, app, _ = env["hosted"]
+    body = {
+        "project_id": assigned["project_id"], "work_id": assigned["work"]["id"],
+        "attempt_id": assigned["work"]["attempt_id"], "name": "model.pt",
+        "size_bytes": 8 * 1024**3, "sha256": hashlib.sha256(b"model").hexdigest(),
+    }
+    with db.session() as session:
+        before = session.get(ResourceCounter, "global").storage_bytes
+    path = env["agent_root"] + "/artifacts"
+    assert agent.post(path, json=body).status_code == 413
+    with db.session() as session:
+        assert session.get(ResourceCounter, "global").storage_bytes == before
+        assert not list(session.scalars(select(TrainingRecord).where(TrainingRecord.kind == "artifact")))
+    assert not (app.state.settings.data_dir / "training-uploads").exists()
+    body["size_bytes"] = 4096
+    artifact = ok(agent.post(path, json=body))
+    with db.session() as session:
+        record = session.get(TrainingRecord, (assigned["project_id"], "artifact", artifact["id"]))
+        assert record.value["status"] == "uploading" and record.value["offset"] == 0
+        assert record.size_bytes > body["size_bytes"]
+        charged = session.get(ResourceCounter, "global").storage_bytes
+        assert charged == before + record.size_bytes
+        assert charged == sum(user.storage_bytes for user in session.scalars(select(User)))
+    assert ok(agent.post(path, json=body))["id"] == artifact["id"]
+    with db.session() as session:
+        assert session.get(ResourceCounter, "global").storage_bytes == charged
+
+
+def test_production_local_sam_uses_the_training_gpu_reservation(tmp_path, monkeypatch):
+    from app.training import gpu
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(gpu.subprocess, "check_output", lambda *_args, **_kwargs: "test-gpu\n")
+    # Exercise the callback actually installed on the production entry-point engine.
+    with main.engine._cuda_reservation():
+        with pytest.raises(ValueError, match="reserved"):
+            with gpu.reserve_gpu({"uuid": "test-gpu"}):
+                pytest.fail("Training cannot acquire a GPU held by local SAM")
+    with gpu.reserve_gpu({"uuid": "test-gpu"}):
+        pass

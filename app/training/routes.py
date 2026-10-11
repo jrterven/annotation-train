@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .data import DatasetInput, ReviewInput, Task
 from .catalog import RunInput
-from .service import TrainingService, require, public
+from .service import TrainingService, require, public, summary
 from .protocol import PredictionInput, DeviceToggle
 from .coordinator import enqueue_operation
 from .transport import artifact_source, stream_file
@@ -31,12 +31,14 @@ def project_router(resolve):
         return TrainingService(resolve(request)).review(body)
 
     @router.post("/datasets/preview")
-    def preview(request: Request, body: DatasetInput):
-        return public(TrainingService(resolve(request)).dataset(body, preview=True))
+    def preview(request: Request, body: DatasetInput, summary_only: bool = False):
+        value = TrainingService(resolve(request)).dataset(body, preview=True)
+        return public(summary(value) if summary_only else value)
 
     @router.post("/datasets", status_code=201)
-    def dataset(request: Request, body: DatasetInput):
-        return public(TrainingService(resolve(request)).dataset(body))
+    def dataset(request: Request, body: DatasetInput, summary_only: bool = False):
+        value = TrainingService(resolve(request)).dataset(body)
+        return public(summary(value) if summary_only else value)
 
     @router.get("/datasets/{dataset_id}")
     def get_dataset(request: Request, dataset_id: str):

@@ -172,8 +172,19 @@ export default function TrainingWorkspace(p: {
               (m) => m.task === p.task && gpu.models.includes(m.id),
             )?.id || old,
       );
-    setDataset((old) => old || result.datasets.at(-1)?.id || "");
+    const newest = result.datasets.reduce<DatasetSnapshot | undefined>(
+      (current, candidate) =>
+        !current || candidate.version > current.version ? candidate : current,
+      undefined,
+    );
+    setDataset((old) => old || newest?.id || "");
   }
+  const reviewState = JSON.stringify(
+    data?.images.map((im) => [im.id, im.revision, im.reviewed]),
+  );
+  useEffect(() => {
+    setPreview(null);
+  }, [reviewState, p.visible]);
   useEffect(() => {
     generation.current++;
     setSelected([]);
@@ -266,11 +277,21 @@ export default function TrainingWorkspace(p: {
     const g = generation.current;
     await p.flush();
     if (g !== generation.current) return;
-    const value = await api<DatasetSnapshot>(
-      `/training/datasets${previewOnly ? "/preview" : ""}`,
-      "POST",
-      options,
-    );
+    if (!previewOnly && !preview) return;
+    let value: DatasetSnapshot;
+    try {
+      value = await api<DatasetSnapshot>(
+        `/training/datasets${previewOnly ? "/preview" : ""}?summary_only=true`,
+        "POST",
+        {
+          ...options,
+          expected_fingerprint: previewOnly ? undefined : preview!.fingerprint,
+        },
+      );
+    } catch (e) {
+      if (g === generation.current) setPreview(null);
+      throw e;
+    }
     if (g !== generation.current) return;
     if (previewOnly) setPreview(value);
     else {

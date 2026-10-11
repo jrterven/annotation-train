@@ -33,6 +33,13 @@ Snapshots retain original bytes and dimensions. Resizing happens inside the
 model. The agent's training assignment and image downloads exclude test data;
 test never influences early stopping or the selected checkpoint.
 
+Split previews and creation in the editor request compact metadata with
+`summary_only=true`; full image annotations stay in the immutable dataset.
+Creation sends the preview's `expected_fingerprint` and returns 409 if the
+reviewed content or split settings changed. These optional API fields preserve
+existing clients and require no persisted schema or agent protocol migration.
+Deploy the matching backend before the updated frontend.
+
 ## Use results
 
 After the best validation model synchronizes, download its weights and manifest,
