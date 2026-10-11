@@ -240,7 +240,10 @@ it("ignores an old session refresh that returns after sign-out", async () => {
         })
       : {},
   );
-  act(() => window.dispatchEvent(new Event("focus")));
+  await waitFor(() => {
+    fireEvent.focus(window);
+    expect(finishRefresh).toBeTypeOf("function");
+  });
   fireEvent.click(screen.getByRole("button", { name: "Mock sign out" }));
   await screen.findByRole("link", { name: /Continue with Google/ });
   await act(async () => {
