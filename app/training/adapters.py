@@ -519,7 +519,12 @@ def predict(work, manifest, directory):
             if manifest["task"] == "segmentation":
                 if masks is None or masks[index].shape != (image["height"], image["width"]):
                     raise ValueError("Model did not return an original-resolution mask")
-                value.update(mask_payload(masks[index].astype(bool), include_preview=False))
+                mask = masks[index].astype(bool)
+                # Low-confidence detections can have no foreground pixels.
+                # They cannot become annotations or valid COCO mask results.
+                if not mask.any():
+                    continue
+                value.update(mask_payload(mask, include_preview=False))
             else:
                 value["kind"] = "bbox"
             proposals.append(value)

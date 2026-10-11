@@ -86,6 +86,26 @@ def test_named_losses_in_pinned_yolo_runtime():
     assert total_loss(None) is None
 
 
+@pytest.mark.parametrize("family", ["yolo26", "rfdetr"])
+@pytest.mark.parametrize("all_empty", [False, True])
+def test_segmentation_predictions_discard_empty_masks(tmp_path, monkeypatch, family, all_empty):
+    from app.training import adapters
+
+    manifest, _, mask = fixture(tmp_path, "segmentation")
+    manifest["classes"] = [{"index": 0, "category_id": 7}]
+    masks = np.stack([np.zeros_like(mask), np.zeros_like(mask) if all_empty else mask])
+    monkeypatch.setattr(adapters, "predictor", lambda *_: lambda *_: (
+        np.array([[1, 1, 9, 10], [1, 1, 9, 10]]), [0, 0], [0.01, 0.02], masks
+    ))
+    result = adapters.predict({"model": {"family": family}}, manifest, tmp_path)
+    for image in result["images"]:
+        assert len(image["proposals"]) == (0 if all_empty else 1)
+        if not all_empty:
+            proposal = image["proposals"][0]
+            assert proposal["category_id"] == 7 and proposal["score"] == 0.02
+            assert np.array_equal(decode_mask(proposal["mask"]), mask)
+
+
 def test_final_coco_report_is_serializable_and_uses_only_test(tmp_path, monkeypatch):
     from app.training import adapters
     from app.training.data import encoded
