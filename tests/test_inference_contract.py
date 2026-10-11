@@ -86,6 +86,22 @@ def test_invalid_prompts_do_not_load_weights():
     assert engine.status()["state"] == "unloaded"
 
 
+def test_local_unload_releases_models_caches_and_gpu_reservation():
+    released = []
+    engine = Sam3Engine(device="cpu")
+    engine._device = "cuda"
+    engine._torch = SimpleNamespace(cuda=SimpleNamespace(empty_cache=lambda: released.append("cache")))
+    engine._gpu_reservation = SimpleNamespace(__exit__=lambda *_: released.append("reservation"))
+    engine._detector = engine._tracker = object()
+    engine._detector_cache["image"] = object()
+    assert engine.unload()["state"] == "unloaded"
+    assert released == ["cache", "reservation"]
+    assert engine._detector is engine._tracker is None
+    assert not engine._detector_cache
+    engine.unload()
+    assert released == ["cache", "reservation"]
+
+
 def test_mps_fallback_only_for_unsupported_operations():
     assert _is_mps_unsupported(NotImplementedError("aten::x is not implemented for the MPS device"))
     assert not _is_mps_unsupported(RuntimeError("MPS out of memory"))

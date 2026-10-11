@@ -1,0 +1,92 @@
+{
+  "protocol": 1,
+  "adapter": 1,
+  "packages": {
+    "ultralytics": "8.4.175",
+    "rfdetr": "1.11.2"
+  },
+  "wheels": {
+    "ultralytics": "16245f680cb6c27856398b3d78a4f4e43d583d0f0c65de0b22431526881b1e1d",
+    "rfdetr": "2f23589567123b59302f1cfa9d14d23630f9f583ee6f3468c5891e33fb103b2a"
+  },
+  "weights": {
+    "yolo26-nano-detection": {
+      "file": "yolo26n.pt",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt",
+      "algorithm": "sha256",
+      "checksum": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef"
+    },
+    "rfdetr-nano-detection": {
+      "file": "rf-detr-nano.pth",
+      "url": "https://storage.googleapis.com/rfdetr/nano_coco/checkpoint_best_regular.pth",
+      "algorithm": "sha256",
+      "checksum": "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d",
+      "upstream_md5": "fb6504cce7fbdc783f7a46991f07639f"
+    },
+    "yolo26-nano-segmentation": {
+      "file": "yolo26n-seg.pt",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-seg.pt",
+      "algorithm": "sha256",
+      "checksum": "361fbfabab285c3237700b6bb91d7ecfa602cd945fffda8dbe1242829b71e73f"
+    },
+    "rfdetr-nano-segmentation": {
+      "file": "rf-detr-seg-nano.pt",
+      "url": "https://storage.googleapis.com/rfdetr/rf-detr-seg-n-ft.pth",
+      "algorithm": "sha256",
+      "checksum": "a44613a4ecd6b5ba61a62002c600b0b6cb7a9da2936a45317ec4b62c635fb99b",
+      "upstream_md5": "9995497791d0ff1664a1d9ddee9cfd20"
+    },
+    "yolo26-small-detection": {
+      "file": "yolo26s.pt",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26s.pt",
+      "algorithm": "sha256",
+      "checksum": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b"
+    },
+    "rfdetr-small-detection": {
+      "file": "rf-detr-small.pth",
+      "url": "https://storage.googleapis.com/rfdetr/small_coco/checkpoint_best_regular.pth",
+      "algorithm": "sha256",
+      "checksum": "d81979a9213a2109345158ce9232668df4c1ae52e9b8db3f2ec0a8cbad959b33",
+      "upstream_md5": "fb37061c1af7bace359c91b723a8d5c1"
+    },
+    "yolo26-small-segmentation": {
+      "file": "yolo26s-seg.pt",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26s-seg.pt",
+      "algorithm": "sha256",
+      "checksum": "3da1d83e31caec96f9300eb4064f4f62882c133c7c264d63dfe61a7c197837a4"
+    },
+    "rfdetr-small-segmentation": {
+      "file": "rf-detr-seg-small.pt",
+      "url": "https://storage.googleapis.com/rfdetr/rf-detr-seg-s-ft.pth",
+      "algorithm": "sha256",
+      "checksum": "6de3da31b2572cac214a1c76cce4a92a13966d56390ac2b3a3de9a8dc2b2bca3",
+      "upstream_md5": "0a2a3006381d0c42853907e700eadd08"
+    },
+    "yolo26-medium-detection": {
+      "file": "yolo26m.pt",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m.pt",
+      "algorithm": "sha256",
+      "checksum": "401cea9ab23ad19246ff7744859816bc599f350e93c9dd30367b6f0a0745d0b7"
+    },
+    "rfdetr-medium-detection": {
+      "file": "rf-detr-medium.pth",
+      "url": "https://storage.googleapis.com/rfdetr/medium_coco/checkpoint_best_regular.pth",
+      "algorithm": "sha256",
+      "checksum": "749ff6071828aaffac63e204c4f4135ed3d6cdae4d702e086c360edc3b5768c8",
+      "upstream_md5": "7223f764a87b863f02eb8d52bf0ce2ee"
+    },
+    "yolo26-medium-segmentation": {
+      "file": "yolo26m-seg.pt",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m-seg.pt",
+      "algorithm": "sha256",
+      "checksum": "16b636f04e8fb6a325b3370f22dc5e5535ff473e384f4d041fd28d788f6ee9f5"
+    },
+    "rfdetr-medium-segmentation": {
+      "file": "rf-detr-seg-medium.pt",
+      "url": "https://storage.googleapis.com/rfdetr/rf-detr-seg-m-ft.pth",
+      "algorithm": "sha256",
+      "checksum": "3ad325094735f431aee9962a8d204d68eb5bfc393d53e7e836e70998fef5ea58",
+      "upstream_md5": "a49af1562c3719227ad43d0ca53b4c7a"
+    }
+  }
+}
