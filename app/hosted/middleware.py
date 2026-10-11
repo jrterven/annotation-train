@@ -43,7 +43,8 @@ class HostedMiddleware:
         origin = headers.get(b"origin", b"").decode()
         if api and origin and origin.rstrip("/") != self.settings.public_url.rstrip("/"):
             return await JSONResponse({"detail": "Origin not allowed"}, status_code=403)(scope, receive, send)
-        if api and scope["method"] in {"POST", "PUT", "PATCH", "DELETE"}:
+        agent = path.startswith("/api/v1/training-agent/")
+        if api and not agent and scope["method"] in {"POST", "PUT", "PATCH", "DELETE"}:
             if not state["user_id"]:
                 return await JSONResponse({"detail": "Sign in to continue"}, status_code=401)(scope, receive, send)
             csrf = headers.get(b"x-csrf-token", b"").decode()

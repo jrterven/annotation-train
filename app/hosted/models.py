@@ -152,3 +152,29 @@ class Attempt(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     deadline_at: Mapped[datetime] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class TrainingRecord(Base):
+    """Additive training metadata, separate from annotation state v2."""
+    __tablename__ = "training_records"
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+
+
+class TrainingNode(Base):
+    __tablename__ = "training_nodes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identity)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    value: Mapped[dict] = mapped_column(JSON)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TrainingPairing(Base):
+    __tablename__ = "training_pairings"
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)

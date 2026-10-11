@@ -46,6 +46,7 @@ import {
   assetURL,
   errorText,
   jobChangedEvent,
+  projectClient,
   selectProject,
   uid,
 } from "./api";
@@ -78,6 +79,7 @@ import {
   type TextPrompt,
 } from "./editorController";
 import ClassPanel from "./ClassPanel";
+import TrainingWorkspace from "./TrainingWorkspace";
 import ExportDialog, { downloadExport } from "./ExportDialog";
 import type { Vertex } from "./CanvasEditor";
 import { FileBrowser, ProjectDialog } from "./ProjectDialog";
@@ -103,9 +105,11 @@ const signature = (part: Part) =>
   });
 export default function App({
   hostedSession,
+  trainingEnabled = true,
   onLogout,
 }: {
   hostedSession?: HostedSession;
+  trainingEnabled?: boolean;
   onLogout?: () => Promise<void>;
 } = {}) {
   const hosted = !!hostedSession;
@@ -124,6 +128,34 @@ export default function App({
   });
   const [modelLoading, setModelLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [trainingVisible, setTrainingVisible] = useState(false);
+  const [trainingVisited, setTrainingVisited] = useState(false);
+  const [trainingStatus, setTrainingStatus] = useState("");
+  useEffect(() => {
+    if (!project || !trainingEnabled || trainingVisible) return;
+    const request = projectClient(project);
+    const controller = new AbortController();
+    const update = () =>
+      void request<{ active_runs: number }>(
+        "/training/status",
+        "GET",
+        undefined,
+        controller.signal,
+      )
+        .then((value) => {
+          if (!controller.signal.aborted)
+            setTrainingStatus(value.active_runs ? "Training in progress" : "");
+        })
+        .catch(() => {
+          /* The full training view reports connection errors. */
+        });
+    update();
+    const timer = setInterval(update, 10000);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
+  }, [project?.id, project?.directory, trainingEnabled, trainingVisible]);
   const [task, setTask] = useState<Task>("segmentation");
   const [showBoxes, setShowBoxes] = useState(false);
   const [exportDialog, setExportDialog] = useState(false);
@@ -1162,7 +1194,7 @@ export default function App({
     URL.revokeObjectURL(url);
   }
   useEditorShortcuts({
-    active: task === "segmentation",
+    active: task === "segmentation" && !trainingVisible,
     selected,
     blocked: !!(
       projectDialog ||
@@ -1259,6 +1291,28 @@ export default function App({
             </button>
           </div>
         )}
+        {project && trainingEnabled && (
+          <nav className="project-workspaces" aria-label="Project workspace">
+            <button
+              aria-pressed={!trainingVisible}
+              onClick={() => setTrainingVisible(false)}
+            >
+              Annotate
+            </button>
+            {trainingEnabled && (
+              <button
+                aria-pressed={trainingVisible}
+                onClick={() => {
+                  setTrainingVisited(true);
+                  setTrainingVisible(true);
+                }}
+                title={trainingStatus || "Train models"}
+              >
+                Train{trainingStatus && " ·"}
+              </button>
+            )}
+          </nav>
+        )}
         <div className="header-actions">
           {hosted && (
             <details className="hosted-account">
@@ -1285,7 +1339,7 @@ export default function App({
                       max={hostedSession.usage.storage_limit_bytes}
                       aria-label="Storage used"
                     />
-                    <small>Images, thumbnails, and annotation data.</small>
+                    <small>Images, annotations, datasets, and models.</small>
                     <p>
                       {hostedSession.usage.inferences_used} /{" "}
                       {hostedSession.usage.inference_limit} SAM 3 requests today
@@ -1383,979 +1437,1052 @@ export default function App({
         </main>
       ) : (
         <>
-          <ResizableWorkspace rightVisible={task === "detection" || inspector}>
-            <aside className="image-sidebar">
-              <div className="sidebar-heading">
-                <span>Images</span>
-                <span className="count-pill">{project.images.length}</span>
-                <IconButton
-                  icon={hosted ? ImagePlus : Link2}
-                  title={
-                    hosted
-                      ? "Upload images or import COCO"
-                      : "Relink image directory"
-                  }
-                  onClick={() =>
-                    hosted ? void showUploads() : setRelink(true)
-                  }
-                />
-              </div>
-              <div className="image-search">
-                <input
-                  aria-label="Filter images"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search images…"
-                />
-              </div>
-              <div className="image-list">
-                {visibleImages.map((img, index) => {
-                  const local = workspace.get(img.id);
-                  const count =
-                    task === "detection"
-                      ? (workspace.getDetection(img.id)?.annotations.length ??
-                        img.annotation_counts?.detection ??
-                        0)
-                      : (local?.annotations.length ??
-                        img.annotation_counts?.segmentation ??
-                        img.annotation_count);
-                  return (
-                    <button
-                      key={img.id}
-                      className={`image-item ${imageId === img.id ? "active" : ""}`}
-                      onClick={() => void navigateTo(img.id)}
-                      title={img.file_name}
-                    >
-                      <div className="thumbnail">
-                        <img
-                          src={assetURL(
-                            `/images/${img.id}/file?thumbnail=true`,
-                          )}
-                          alt=""
-                          loading="lazy"
-                        />
-                        {count > 0 && (
-                          <span className="thumb-check">
-                            <Check size={10} />
-                          </span>
-                        )}
-                      </div>
-                      <div className="image-item-info">
-                        <span>{img.file_name.split("/").pop()}</span>
-                        <small>
-                          {count
-                            ? `${count} instance${count === 1 ? "" : "s"}`
-                            : "Unannotated"}
-                          {(
-                            task === "segmentation"
-                              ? local?.draft
-                              : workspace.getDetection(img.id)?.draft
-                          )
-                            ? " · draft"
-                            : ""}
-                        </small>
-                      </div>
-                      <span className="image-index">
-                        {String(index + 1).padStart(2, "0")}
-                      </span>
-                    </button>
+          {trainingVisited && (
+            <TrainingWorkspace
+              key={project.id || project.directory}
+              project={project}
+              task={task}
+              visible={trainingVisible}
+              flush={workspace.flush}
+              onStatus={setTrainingStatus}
+              onAnnotate={(id) => {
+                setTrainingVisible(false);
+                if (id !== undefined)
+                  navigate(project.images.findIndex((im) => im.id === id));
+              }}
+              onPredictions={async (batchId) => {
+                const session = sessionToken.current;
+                const request = projectClient(project);
+                await workspace.flush();
+                if (session !== sessionToken.current) return;
+                const result = await request<{ image_ids: number[] }>(
+                  `/training/predictions/${batchId}/apply`,
+                  "POST",
+                  {},
+                );
+                if (session !== sessionToken.current) return;
+                for (const id of result.image_ids) {
+                  if (session !== sessionToken.current) return;
+                  await workspace.load(id, true);
+                }
+                if (session !== sessionToken.current) return;
+                setTrainingVisible(false);
+                if (result.image_ids.length)
+                  navigate(
+                    project.images.findIndex(
+                      (im) => im.id === result.image_ids[0],
+                    ),
                   );
-                })}
-                {!visibleImages.length && (
-                  <div className="empty-panel">
-                    {project.images.length
-                      ? "No matches"
-                      : hosted
-                        ? "Upload images to begin."
-                        : "No images in this directory."}
-                  </div>
-                )}
-              </div>
-              <div className="image-list-footer">
-                <span>
-                  {Math.max(0, imageIndex + 1)} of {project.images.length}
-                </span>
-                <div>
+              }}
+            />
+          )}
+          <div className="annotation-workspace" hidden={trainingVisible}>
+            <ResizableWorkspace
+              rightVisible={task === "detection" || inspector}
+            >
+              <aside className="image-sidebar">
+                <div className="sidebar-heading">
+                  <span>Images</span>
+                  <span className="count-pill">{project.images.length}</span>
                   <IconButton
-                    icon={ArrowUp}
-                    title="Previous image · ↑"
-                    disabled={imageIndex <= 0}
-                    onClick={() => navigate(imageIndex - 1)}
-                  />
-                  <IconButton
-                    icon={ArrowDown}
-                    title="Next image · ↓"
-                    disabled={imageIndex >= project.images.length - 1}
-                    onClick={() => navigate(imageIndex + 1)}
+                    icon={hosted ? ImagePlus : Link2}
+                    title={
+                      hosted
+                        ? "Upload images or import COCO"
+                        : "Relink image directory"
+                    }
+                    onClick={() =>
+                      hosted ? void showUploads() : setRelink(true)
+                    }
                   />
                 </div>
-              </div>
-            </aside>
-            <PanelResizeHandle side="left" />
-            {task === "segmentation" && (
-              <main className="editor-main">
-                <div className="editor-toolbar">
-                  <div className="toolbar-controls">
-                    <div className="tool-group">
-                      <IconButton
-                        icon={MousePointer2}
-                        title="Select and edit · V"
-                        active={tool === "select"}
-                        onClick={() => setTool("select")}
-                      />
-                      <IconButton
-                        icon={Hand}
-                        title="Pan image · drag to move"
-                        active={tool === "pan"}
-                        onClick={() => setTool("pan")}
-                      />
-                      <IconButton
-                        icon={Plus}
-                        title="Positive point · P"
-                        active={tool === "positive"}
-                        onClick={() => {
-                          setTool("positive");
-                          setSelected(null);
-                        }}
-                      />
-                      <IconButton
-                        icon={Minus}
-                        title="Negative point · E"
-                        active={tool === "negative"}
-                        onClick={() => {
-                          setTool("negative");
-                          setSelected(null);
-                        }}
-                      />
-                      <IconButton
-                        icon={BoxSelect}
-                        title="Bounding box · B"
-                        active={tool === "box"}
-                        onClick={() => {
-                          setTool("box");
-                          setSelected(null);
-                        }}
-                      />
-                      <IconButton
-                        icon={Pentagon}
-                        title="Polygon · G"
-                        active={tool === "polygon"}
-                        onClick={() => {
-                          setTool("polygon");
-                          setSelected(null);
-                          setVertex(null);
-                        }}
-                      />
-                    </div>
-                    <span className="toolbar-divider" />
-                    <div className="category-control">
-                      <i
-                        style={{
-                          background: selectedCategory?.color || "#9b9a90",
-                        }}
-                      />
-                      <select
-                        aria-label="Active class"
-                        value={categoryId}
-                        onChange={(e) => setCategoryId(Number(e.target.value))}
-                      >
-                        {!project.categories.length && (
-                          <option value={0}>Create a class</option>
-                        )}
-                        {project.categories.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="icon-button small"
-                        title="Create class"
-                        onClick={() => editCategory("new")}
-                      >
-                        <Plus size={15} />
-                      </button>
-                    </div>
-                    <div className="toolbar-spacer" />
-                    <IconButton
-                      icon={Undo2}
-                      title="Undo · ⌘ Z"
-                      disabled={!entry?.past.length || geometryBusy}
-                      onClick={() => undo()}
-                    />
-                    <IconButton
-                      icon={Redo2}
-                      title="Redo · ⇧ ⌘ Z"
-                      disabled={!entry?.future.length || geometryBusy}
-                      onClick={() => undo(true)}
-                    />
-                    <span className="toolbar-divider" />
-                    <IconButton
-                      icon={showMasks ? Eye : EyeOff}
-                      title="Show/hide masks · H"
-                      active={!showMasks}
-                      onClick={() => setShowMasks((v) => !v)}
-                    />
-                    <IconButton
-                      icon={inspector ? PanelRightClose : PanelRightOpen}
-                      title={inspector ? "Hide panel" : "Show panel"}
-                      onClick={() => setInspector((v) => !v)}
-                    />
-                  </div>
-                  {currentImage && state && (
-                    <form
-                      className="text-prompt-bar"
-                      aria-label="Concept segmentation"
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        void inferText();
-                      }}
-                    >
-                      <Sparkles size={17} />
-                      <select
-                        className="prompt-language"
-                        aria-label="Prompt language"
-                        title={
-                          hosted
-                            ? "Spanish prompts are translated to English on the GPU server"
-                            : "Spanish prompts are translated to English locally"
-                        }
-                        value={promptLanguage}
-                        onChange={(e) =>
-                          setPromptLanguage(e.target.value as "en" | "es")
-                        }
-                      >
-                        <option value="en">English</option>
-                        <option value="es">Spanish</option>
-                      </select>
-                      <input
-                        aria-label="Object to segment"
-                        placeholder={
-                          visualExample
-                            ? "Optional description"
-                            : `Object to segment (in ${promptLanguage === "es" ? "Spanish" : "English"})`
-                        }
-                        value={text}
-                        onChange={(e) => setText(e.target.value)}
-                      />
-                      <VisualReference
-                        value={visualExample}
-                        scope={`${project.id || project.directory}:${sessionToken.current}:${imageId}`}
-                        onChange={changeVisualExample}
-                        onPickStart={cancelProposalSearches}
-                        onOpenChange={setVisualDialogOpen}
-                      />
-                      <button
-                        type="submit"
-                        disabled={
-                          (!text.trim() && !visualExample) ||
-                          textBusy ||
-                          mergingProposals
-                        }
-                        title="Generate proposals with SAM 3"
-                        aria-label="Generate proposals with SAM 3"
-                      >
-                        {textBusy ? (
-                          <LoaderCircle className="spin" size={16} />
-                        ) : (
-                          <ArrowUpRight size={18} />
-                        )}
-                      </button>
-                    </form>
-                  )}
+                <div className="image-search">
+                  <input
+                    aria-label="Filter images"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search images…"
+                  />
                 </div>
-                <div className="canvas-area">
-                  {currentImage && state && !loadingImage ? (
-                    <CanvasEditor
-                      key={currentImage.id}
-                      image={currentImage}
-                      annotations={state.annotations}
-                      proposals={state.proposals}
-                      draft={state.draft}
-                      categories={project.categories}
-                      selected={selected}
-                      tool={tool}
-                      showMasks={showMasks}
-                      showBoxes={showBoxes}
-                      opacity={opacity}
-                      vertex={vertex}
-                      busy={geometryBusy || confirming}
-                      onVertex={setVertex}
-                      onSelect={setSelected}
-                      onProposal={(id) =>
-                        update(
-                          (s) => ({
-                            ...s,
-                            proposals: s.proposals.map((p) =>
-                              p.id === id ? { ...p, selected: !p.selected } : p,
-                            ),
-                          }),
-                          false,
-                        )
-                      }
-                      onPoint={(point, negative) => addPrompt(point, negative)}
-                      onBox={(box) => addPrompt(undefined, false, box)}
-                      onPolygon={changePolygon}
-                      onGeometry={(id, c) => void editGeometry(id, c)}
-                      fitRef={fitRef}
-                    />
-                  ) : (
-                    <div className="canvas-placeholder">
-                      {loadingImage ? (
-                        <>
-                          <LoaderCircle size={26} className="spin" />
-                          <span>Loading image…</span>
-                        </>
-                      ) : (
-                        <>
-                          <ImagePlus size={38} strokeWidth={1} />
-                          <span>No images</span>
-                          {hosted && (
-                            <button
-                              className="button primary"
-                              onClick={() => void showUploads()}
-                            >
-                              <ImagePlus size={16} /> Upload images
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  )}
-
-                  {currentImage && state?.draft && (
-                    <div className="draft-floating">
-                      <span>
-                        <i />
-                        {pointBusy ? "Segmenting…" : "Draft"}{" "}
-                        <small>
-                          {state.draft.parts.length} part
-                          {state.draft.parts.length === 1 ? "" : "s"}
-                        </small>
-                      </span>
-                      {activePolygon && !activePolygon.closed ? (
-                        <button
-                          className="button secondary compact"
-                          disabled={
-                            activePolygon.vertices.length < 3 || confirming
-                          }
-                          onClick={closePolygon}
-                        >
-                          Close polygon <kbd>↵</kbd>
-                        </button>
-                      ) : activePolygon && !activePart?.mask ? (
-                        <>
-                          {
-                            <button
-                              className="button primary compact"
-                              disabled={pointBusy || geometryBusy || confirming}
-                              onClick={() => void usePolygon()}
-                              title="Use the drawn polygon without SAM 3"
-                            >
-                              {geometryBusy ? (
-                                <LoaderCircle className="spin" size={14} />
-                              ) : (
-                                <Pentagon size={14} />
-                              )}
-                              Use polygon
-                            </button>
-                          }
-                          <button
-                            className="button secondary compact"
-                            disabled={
-                              pointBusy ||
-                              confirming ||
-                              geometryBusy ||
-                              (hosted && !modelReady)
-                            }
-                            title={
-                              hosted && !modelReady
-                                ? "SAM 3 is unavailable. Use polygon for manual annotation."
-                                : undefined
-                            }
-                            onClick={refinePolygon}
-                          >
-                            {pointBusy ? (
-                              <LoaderCircle className="spin" size={14} />
-                            ) : (
-                              <ScanLine size={14} />
+                <div className="image-list">
+                  {visibleImages.map((img, index) => {
+                    const local = workspace.get(img.id);
+                    const count =
+                      task === "detection"
+                        ? (workspace.getDetection(img.id)?.annotations.length ??
+                          img.annotation_counts?.detection ??
+                          0)
+                        : (local?.annotations.length ??
+                          img.annotation_counts?.segmentation ??
+                          img.annotation_count);
+                    return (
+                      <button
+                        key={img.id}
+                        className={`image-item ${imageId === img.id ? "active" : ""}`}
+                        onClick={() => void navigateTo(img.id)}
+                        title={img.file_name}
+                      >
+                        <div className="thumbnail">
+                          <img
+                            src={assetURL(
+                              `/images/${img.id}/file?thumbnail=true`,
                             )}
-                            Refine with SAM
-                          </button>
-                        </>
-                      ) : null}
-                      <button
-                        className="button primary compact"
-                        disabled={!readyToConfirm}
-                        onClick={() => void confirmDraft()}
-                      >
-                        {confirming ? (
-                          <LoaderCircle className="spin" size={14} />
-                        ) : (
-                          <Check size={14} />
-                        )}{" "}
-                        Confirm <kbd>↵</kbd>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </main>
-            )}
-            {inspector && task === "segmentation" && (
-              <PanelResizeHandle side="right" />
-            )}
-            {inspector && task === "segmentation" && (
-              <aside className="inspector">
-                <div className="inspector-heading">
-                  <span>Objects</span>
-                  <span className="count-pill">
-                    {state?.annotations.length || 0}
-                  </span>
-                  <SlidersHorizontal size={15} />
-                </div>
-                {state?.draft && (
-                  <section className="draft-panel">
-                    <div className="panel-label">
-                      <span>
-                        <Circle size={11} fill="currentColor" /> Object in
-                        progress
-                      </span>
-                      <IconButton
-                        icon={Trash2}
-                        title="Discard draft"
-                        onClick={discardDraft}
-                      />
-                    </div>
-                    <div className="draft-category">
-                      <i
-                        style={{
-                          background: project.categories.find(
-                            (c) => c.id === state.draft?.category_id,
-                          )?.color,
-                        }}
-                      />
-                      <select
-                        aria-label="Draft class"
-                        value={state.draft.category_id}
-                        onChange={(e) =>
-                          update((s) => ({
-                            ...s,
-                            draft: s.draft
-                              ? {
-                                  ...s.draft,
-                                  category_id: Number(e.target.value),
-                                }
-                              : null,
-                          }))
-                        }
-                      >
-                        {project.categories.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="parts-list">
-                      {state.draft.parts.map((part, i) => (
-                        <div
-                          className={`part-item ${state.draft?.active_part_id === part.id ? "active" : ""}`}
-                          key={part.id}
-                        >
-                          <button
-                            onClick={() => {
-                              update(
-                                (s) => ({
-                                  ...s,
-                                  draft: s.draft
-                                    ? { ...s.draft, active_part_id: part.id }
-                                    : null,
-                                }),
-                                false,
-                              );
-                              setTool(
-                                part.polygon && !part.seed_mask
-                                  ? "polygon"
-                                  : "positive",
-                              );
-                              setSelected(null);
-                            }}
-                          >
-                            <span>Part {i + 1}</span>
-                            <small>
-                              {part.mask
-                                ? "Ready"
-                                : partErrors.current.has(
-                                      `part:${imageId}:${part.id}`,
-                                    )
-                                  ? "Failed"
-                                  : part.polygon && !part.seed_mask
-                                    ? part.polygon.closed
-                                      ? "Closed polygon"
-                                      : `${part.polygon.vertices.length} vertices`
-                                    : part.points.length ||
-                                        part.box ||
-                                        part.seed_mask
-                                      ? "Pending"
-                                      : "No prompts"}
-                            </small>
-                          </button>
-                          {!part.mask &&
-                            (part.points.length > 0 ||
-                              part.box ||
-                              part.seed_mask) &&
-                            !pending.current.has(
-                              `part:${imageId}:${part.id}`,
-                            ) && (
-                              <IconButton
-                                icon={RotateCcw}
-                                title="Retry segmentation"
-                                onClick={() =>
-                                  imageId !== null &&
-                                  state.draft &&
-                                  void inferPart(imageId, state.draft.id, part)
-                                }
-                              />
-                            )}
-                          <IconButton
-                            icon={X}
-                            title="Remove part"
-                            onClick={() => removePart(part.id)}
+                            alt=""
+                            loading="lazy"
                           />
-                          {!part.mask &&
-                            partErrors.current.has(
-                              `part:${imageId}:${part.id}`,
-                            ) && (
-                              <p className="part-error" role="alert">
-                                {partErrors.current.get(
-                                  `part:${imageId}:${part.id}`,
-                                )}{" "}
-                                {part.polygon && !part.seed_mask
-                                  ? "Check the polygon, then use Refine with SAM to try again."
-                                  : "Use Retry segmentation to try again."}
-                              </p>
-                            )}
-                        </div>
-                      ))}
-                    </div>
-                    {activePolygon && (
-                      <div className="polygon-actions">
-                        {activePolygon.closed && (
-                          <button
-                            className="text-button"
-                            disabled={confirming}
-                            onClick={() => {
-                              changePolygon(activePolygon.vertices, false);
-                              setTool("polygon");
-                            }}
-                          >
-                            <Pentagon size={14} /> Edit polygon
-                          </button>
-                        )}
-                        {!activePolygon.closed &&
-                          activePolygon.vertices.length > 0 && (
-                            <button
-                              className="text-button"
-                              disabled={confirming}
-                              onClick={() =>
-                                changePolygon(
-                                  activePolygon.vertices.slice(0, -1),
-                                  false,
-                                )
-                              }
-                            >
-                              <Undo2 size={14} /> Remove last vertex
-                            </button>
+                          {count > 0 && (
+                            <span className="thumb-check">
+                              <Check size={10} />
+                            </span>
                           )}
+                        </div>
+                        <div className="image-item-info">
+                          <span>{img.file_name.split("/").pop()}</span>
+                          <small>
+                            {count
+                              ? `${count} instance${count === 1 ? "" : "s"}`
+                              : "Unannotated"}
+                            {(
+                              task === "segmentation"
+                                ? local?.draft
+                                : workspace.getDetection(img.id)?.draft
+                            )
+                              ? " · draft"
+                              : ""}
+                          </small>
+                        </div>
+                        <span className="image-index">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {!visibleImages.length && (
+                    <div className="empty-panel">
+                      {project.images.length
+                        ? "No matches"
+                        : hosted
+                          ? "Upload images to begin."
+                          : "No images in this directory."}
+                    </div>
+                  )}
+                </div>
+                <div className="image-list-footer">
+                  <span>
+                    {Math.max(0, imageIndex + 1)} of {project.images.length}
+                  </span>
+                  <div>
+                    <IconButton
+                      icon={ArrowUp}
+                      title="Previous image · ↑"
+                      disabled={imageIndex <= 0}
+                      onClick={() => navigate(imageIndex - 1)}
+                    />
+                    <IconButton
+                      icon={ArrowDown}
+                      title="Next image · ↓"
+                      disabled={imageIndex >= project.images.length - 1}
+                      onClick={() => navigate(imageIndex + 1)}
+                    />
+                  </div>
+                </div>
+              </aside>
+              <PanelResizeHandle side="left" />
+              {task === "segmentation" && (
+                <main className="editor-main">
+                  <div className="editor-toolbar">
+                    <div className="toolbar-controls">
+                      <div className="tool-group">
+                        <IconButton
+                          icon={MousePointer2}
+                          title="Select and edit · V"
+                          active={tool === "select"}
+                          onClick={() => setTool("select")}
+                        />
+                        <IconButton
+                          icon={Hand}
+                          title="Pan image · drag to move"
+                          active={tool === "pan"}
+                          onClick={() => setTool("pan")}
+                        />
+                        <IconButton
+                          icon={Plus}
+                          title="Positive point · P"
+                          active={tool === "positive"}
+                          onClick={() => {
+                            setTool("positive");
+                            setSelected(null);
+                          }}
+                        />
+                        <IconButton
+                          icon={Minus}
+                          title="Negative point · E"
+                          active={tool === "negative"}
+                          onClick={() => {
+                            setTool("negative");
+                            setSelected(null);
+                          }}
+                        />
+                        <IconButton
+                          icon={BoxSelect}
+                          title="Bounding box · B"
+                          active={tool === "box"}
+                          onClick={() => {
+                            setTool("box");
+                            setSelected(null);
+                          }}
+                        />
+                        <IconButton
+                          icon={Pentagon}
+                          title="Polygon · G"
+                          active={tool === "polygon"}
+                          onClick={() => {
+                            setTool("polygon");
+                            setSelected(null);
+                            setVertex(null);
+                          }}
+                        />
                       </div>
-                    )}
-                    <button className="text-button add-part" onClick={addPart}>
-                      <Plus size={14} /> Add part to object
-                    </button>
-                  </section>
-                )}
-                {(state?.proposals.length || 0) > 0 && (
-                  <section className="proposals-panel">
-                    <div className="panel-label">
-                      <span>
-                        <Sparkles size={13} /> Proposals{" "}
-                        <b>{state?.proposals.length}</b>
-                      </span>
+                      <span className="toolbar-divider" />
+                      <div className="category-control">
+                        <i
+                          style={{
+                            background: selectedCategory?.color || "#9b9a90",
+                          }}
+                        />
+                        <select
+                          aria-label="Active class"
+                          value={categoryId}
+                          onChange={(e) =>
+                            setCategoryId(Number(e.target.value))
+                          }
+                        >
+                          {!project.categories.length && (
+                            <option value={0}>Create a class</option>
+                          )}
+                          {project.categories.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="icon-button small"
+                          title="Create class"
+                          onClick={() => editCategory("new")}
+                        >
+                          <Plus size={15} />
+                        </button>
+                      </div>
+                      <div className="toolbar-spacer" />
                       <IconButton
-                        icon={X}
-                        title="Discard proposals"
-                        disabled={geometryBusy || confirming}
-                        onClick={() => update((s) => ({ ...s, proposals: [] }))}
+                        icon={Undo2}
+                        title="Undo · ⌘ Z"
+                        disabled={!entry?.past.length || geometryBusy}
+                        onClick={() => undo()}
+                      />
+                      <IconButton
+                        icon={Redo2}
+                        title="Redo · ⇧ ⌘ Z"
+                        disabled={!entry?.future.length || geometryBusy}
+                        onClick={() => undo(true)}
+                      />
+                      <span className="toolbar-divider" />
+                      <IconButton
+                        icon={showMasks ? Eye : EyeOff}
+                        title="Show/hide masks · H"
+                        active={!showMasks}
+                        onClick={() => setShowMasks((v) => !v)}
+                      />
+                      <IconButton
+                        icon={inspector ? PanelRightClose : PanelRightOpen}
+                        title={inspector ? "Hide panel" : "Show panel"}
+                        onClick={() => setInspector((v) => !v)}
                       />
                     </div>
-                    {currentTextPrompt && (
-                      <p
-                        className="proposal-prompt"
-                        title={
-                          currentTextPrompt.source_language === "es"
-                            ? `Original: ${currentTextPrompt.original}`
-                            : currentTextPrompt.english
-                        }
+                    {currentImage && state && (
+                      <form
+                        className="text-prompt-bar"
+                        aria-label="Concept segmentation"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void inferText();
+                        }}
                       >
-                        Prompt: <strong>{currentTextPrompt.english}</strong>
-                      </p>
+                        <Sparkles size={17} />
+                        <select
+                          className="prompt-language"
+                          aria-label="Prompt language"
+                          title={
+                            hosted
+                              ? "Spanish prompts are translated to English on the GPU server"
+                              : "Spanish prompts are translated to English locally"
+                          }
+                          value={promptLanguage}
+                          onChange={(e) =>
+                            setPromptLanguage(e.target.value as "en" | "es")
+                          }
+                        >
+                          <option value="en">English</option>
+                          <option value="es">Spanish</option>
+                        </select>
+                        <input
+                          aria-label="Object to segment"
+                          placeholder={
+                            visualExample
+                              ? "Optional description"
+                              : `Object to segment (in ${promptLanguage === "es" ? "Spanish" : "English"})`
+                          }
+                          value={text}
+                          onChange={(e) => setText(e.target.value)}
+                        />
+                        <VisualReference
+                          value={visualExample}
+                          scope={`${project.id || project.directory}:${sessionToken.current}:${imageId}`}
+                          onChange={changeVisualExample}
+                          onPickStart={cancelProposalSearches}
+                          onOpenChange={setVisualDialogOpen}
+                        />
+                        <button
+                          type="submit"
+                          disabled={
+                            (!text.trim() && !visualExample) ||
+                            textBusy ||
+                            mergingProposals
+                          }
+                          title="Generate proposals with SAM 3"
+                          aria-label="Generate proposals with SAM 3"
+                        >
+                          {textBusy ? (
+                            <LoaderCircle className="spin" size={16} />
+                          ) : (
+                            <ArrowUpRight size={18} />
+                          )}
+                        </button>
+                      </form>
                     )}
-                    <div className="proposal-actions">
-                      <button
-                        className="text-button"
-                        disabled={geometryBusy || confirming}
-                        onClick={() =>
+                  </div>
+                  <div className="canvas-area">
+                    {currentImage && state && !loadingImage ? (
+                      <CanvasEditor
+                        key={currentImage.id}
+                        image={currentImage}
+                        annotations={state.annotations}
+                        proposals={state.proposals}
+                        draft={state.draft}
+                        categories={project.categories}
+                        selected={selected}
+                        tool={tool}
+                        showMasks={showMasks}
+                        showBoxes={showBoxes}
+                        opacity={opacity}
+                        vertex={vertex}
+                        busy={geometryBusy || confirming}
+                        onVertex={setVertex}
+                        onSelect={setSelected}
+                        onProposal={(id) =>
                           update(
                             (s) => ({
                               ...s,
-                              proposals: s.proposals.map((p) => ({
-                                ...p,
-                                selected: !s.proposals.every((a) => a.selected),
-                              })),
+                              proposals: s.proposals.map((p) =>
+                                p.id === id
+                                  ? { ...p, selected: !p.selected }
+                                  : p,
+                              ),
                             }),
                             false,
                           )
                         }
-                      >
-                        {state?.proposals.every((p) => p.selected)
-                          ? "Deselect all"
-                          : "Select all"}
-                      </button>
-                      <span>{selectedProposals.length} selected</span>
-                    </div>
-                    {state?.proposals.map((proposal, i) => (
-                      <div
-                        className={`proposal-item ${proposal.selected ? "active" : ""}`}
-                        key={proposal.id}
-                      >
+                        onPoint={(point, negative) =>
+                          addPrompt(point, negative)
+                        }
+                        onBox={(box) => addPrompt(undefined, false, box)}
+                        onPolygon={changePolygon}
+                        onGeometry={(id, c) => void editGeometry(id, c)}
+                        fitRef={fitRef}
+                      />
+                    ) : (
+                      <div className="canvas-placeholder">
+                        {loadingImage ? (
+                          <>
+                            <LoaderCircle size={26} className="spin" />
+                            <span>Loading image…</span>
+                          </>
+                        ) : (
+                          <>
+                            <ImagePlus size={38} strokeWidth={1} />
+                            <span>No images</span>
+                            {hosted && (
+                              <button
+                                className="button primary"
+                                onClick={() => void showUploads()}
+                              >
+                                <ImagePlus size={16} /> Upload images
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {currentImage && state?.draft && (
+                      <div className="draft-floating">
+                        <span>
+                          <i />
+                          {pointBusy ? "Segmenting…" : "Draft"}{" "}
+                          <small>
+                            {state.draft.parts.length} part
+                            {state.draft.parts.length === 1 ? "" : "s"}
+                          </small>
+                        </span>
+                        {activePolygon && !activePolygon.closed ? (
+                          <button
+                            className="button secondary compact"
+                            disabled={
+                              activePolygon.vertices.length < 3 || confirming
+                            }
+                            onClick={closePolygon}
+                          >
+                            Close polygon <kbd>↵</kbd>
+                          </button>
+                        ) : activePolygon && !activePart?.mask ? (
+                          <>
+                            {
+                              <button
+                                className="button primary compact"
+                                disabled={
+                                  pointBusy || geometryBusy || confirming
+                                }
+                                onClick={() => void usePolygon()}
+                                title="Use the drawn polygon without SAM 3"
+                              >
+                                {geometryBusy ? (
+                                  <LoaderCircle className="spin" size={14} />
+                                ) : (
+                                  <Pentagon size={14} />
+                                )}
+                                Use polygon
+                              </button>
+                            }
+                            <button
+                              className="button secondary compact"
+                              disabled={
+                                pointBusy ||
+                                confirming ||
+                                geometryBusy ||
+                                (hosted && !modelReady)
+                              }
+                              title={
+                                hosted && !modelReady
+                                  ? "SAM 3 is unavailable. Use polygon for manual annotation."
+                                  : undefined
+                              }
+                              onClick={refinePolygon}
+                            >
+                              {pointBusy ? (
+                                <LoaderCircle className="spin" size={14} />
+                              ) : (
+                                <ScanLine size={14} />
+                              )}
+                              Refine with SAM
+                            </button>
+                          </>
+                        ) : null}
                         <button
-                          className="proposal-checkbox"
-                          aria-label={`Select proposal ${i + 1}`}
-                          aria-pressed={proposal.selected}
+                          className="button primary compact"
+                          disabled={!readyToConfirm}
+                          onClick={() => void confirmDraft()}
+                        >
+                          {confirming ? (
+                            <LoaderCircle className="spin" size={14} />
+                          ) : (
+                            <Check size={14} />
+                          )}{" "}
+                          Confirm <kbd>↵</kbd>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </main>
+              )}
+              {inspector && task === "segmentation" && (
+                <PanelResizeHandle side="right" />
+              )}
+              {inspector && task === "segmentation" && (
+                <aside className="inspector">
+                  <div className="inspector-heading">
+                    <span>Objects</span>
+                    <span className="count-pill">
+                      {state?.annotations.length || 0}
+                    </span>
+                    <SlidersHorizontal size={15} />
+                  </div>
+                  {state?.draft && (
+                    <section className="draft-panel">
+                      <div className="panel-label">
+                        <span>
+                          <Circle size={11} fill="currentColor" /> Object in
+                          progress
+                        </span>
+                        <IconButton
+                          icon={Trash2}
+                          title="Discard draft"
+                          onClick={discardDraft}
+                        />
+                      </div>
+                      <div className="draft-category">
+                        <i
+                          style={{
+                            background: project.categories.find(
+                              (c) => c.id === state.draft?.category_id,
+                            )?.color,
+                          }}
+                        />
+                        <select
+                          aria-label="Draft class"
+                          value={state.draft.category_id}
+                          onChange={(e) =>
+                            update((s) => ({
+                              ...s,
+                              draft: s.draft
+                                ? {
+                                    ...s.draft,
+                                    category_id: Number(e.target.value),
+                                  }
+                                : null,
+                            }))
+                          }
+                        >
+                          {project.categories.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="parts-list">
+                        {state.draft.parts.map((part, i) => (
+                          <div
+                            className={`part-item ${state.draft?.active_part_id === part.id ? "active" : ""}`}
+                            key={part.id}
+                          >
+                            <button
+                              onClick={() => {
+                                update(
+                                  (s) => ({
+                                    ...s,
+                                    draft: s.draft
+                                      ? { ...s.draft, active_part_id: part.id }
+                                      : null,
+                                  }),
+                                  false,
+                                );
+                                setTool(
+                                  part.polygon && !part.seed_mask
+                                    ? "polygon"
+                                    : "positive",
+                                );
+                                setSelected(null);
+                              }}
+                            >
+                              <span>Part {i + 1}</span>
+                              <small>
+                                {part.mask
+                                  ? "Ready"
+                                  : partErrors.current.has(
+                                        `part:${imageId}:${part.id}`,
+                                      )
+                                    ? "Failed"
+                                    : part.polygon && !part.seed_mask
+                                      ? part.polygon.closed
+                                        ? "Closed polygon"
+                                        : `${part.polygon.vertices.length} vertices`
+                                      : part.points.length ||
+                                          part.box ||
+                                          part.seed_mask
+                                        ? "Pending"
+                                        : "No prompts"}
+                              </small>
+                            </button>
+                            {!part.mask &&
+                              (part.points.length > 0 ||
+                                part.box ||
+                                part.seed_mask) &&
+                              !pending.current.has(
+                                `part:${imageId}:${part.id}`,
+                              ) && (
+                                <IconButton
+                                  icon={RotateCcw}
+                                  title="Retry segmentation"
+                                  onClick={() =>
+                                    imageId !== null &&
+                                    state.draft &&
+                                    void inferPart(
+                                      imageId,
+                                      state.draft.id,
+                                      part,
+                                    )
+                                  }
+                                />
+                              )}
+                            <IconButton
+                              icon={X}
+                              title="Remove part"
+                              onClick={() => removePart(part.id)}
+                            />
+                            {!part.mask &&
+                              partErrors.current.has(
+                                `part:${imageId}:${part.id}`,
+                              ) && (
+                                <p className="part-error" role="alert">
+                                  {partErrors.current.get(
+                                    `part:${imageId}:${part.id}`,
+                                  )}{" "}
+                                  {part.polygon && !part.seed_mask
+                                    ? "Check the polygon, then use Refine with SAM to try again."
+                                    : "Use Retry segmentation to try again."}
+                                </p>
+                              )}
+                          </div>
+                        ))}
+                      </div>
+                      {activePolygon && (
+                        <div className="polygon-actions">
+                          {activePolygon.closed && (
+                            <button
+                              className="text-button"
+                              disabled={confirming}
+                              onClick={() => {
+                                changePolygon(activePolygon.vertices, false);
+                                setTool("polygon");
+                              }}
+                            >
+                              <Pentagon size={14} /> Edit polygon
+                            </button>
+                          )}
+                          {!activePolygon.closed &&
+                            activePolygon.vertices.length > 0 && (
+                              <button
+                                className="text-button"
+                                disabled={confirming}
+                                onClick={() =>
+                                  changePolygon(
+                                    activePolygon.vertices.slice(0, -1),
+                                    false,
+                                  )
+                                }
+                              >
+                                <Undo2 size={14} /> Remove last vertex
+                              </button>
+                            )}
+                        </div>
+                      )}
+                      <button
+                        className="text-button add-part"
+                        onClick={addPart}
+                      >
+                        <Plus size={14} /> Add part to object
+                      </button>
+                    </section>
+                  )}
+                  {(state?.proposals.length || 0) > 0 && (
+                    <section className="proposals-panel">
+                      <div className="panel-label">
+                        <span>
+                          <Sparkles size={13} /> Proposals{" "}
+                          <b>{state?.proposals.length}</b>
+                        </span>
+                        <IconButton
+                          icon={X}
+                          title="Discard proposals"
+                          disabled={geometryBusy || confirming}
+                          onClick={() =>
+                            update((s) => ({ ...s, proposals: [] }))
+                          }
+                        />
+                      </div>
+                      {currentTextPrompt && (
+                        <p
+                          className="proposal-prompt"
+                          title={
+                            currentTextPrompt.source_language === "es"
+                              ? `Original: ${currentTextPrompt.original}`
+                              : currentTextPrompt.english
+                          }
+                        >
+                          Prompt: <strong>{currentTextPrompt.english}</strong>
+                        </p>
+                      )}
+                      <div className="proposal-actions">
+                        <button
+                          className="text-button"
                           disabled={geometryBusy || confirming}
                           onClick={() =>
                             update(
                               (s) => ({
                                 ...s,
-                                proposals: s.proposals.map((p) =>
-                                  p.id === proposal.id
-                                    ? { ...p, selected: !p.selected }
-                                    : p,
-                                ),
+                                proposals: s.proposals.map((p) => ({
+                                  ...p,
+                                  selected: !s.proposals.every(
+                                    (a) => a.selected,
+                                  ),
+                                })),
                               }),
                               false,
                             )
                           }
                         >
-                          {proposal.selected && <Check size={12} />}
+                          {state?.proposals.every((p) => p.selected)
+                            ? "Deselect all"
+                            : "Select all"}
                         </button>
-                        <span>
-                          Proposal {i + 1}
-                          <small>{Math.round(proposal.score * 100)}%</small>
-                        </span>
-                        <button
-                          className="text-button"
-                          onClick={() => refineProposal(proposal)}
-                          title="Refine with clicks"
-                          disabled={geometryBusy || confirming}
+                        <span>{selectedProposals.length} selected</span>
+                      </div>
+                      {state?.proposals.map((proposal, i) => (
+                        <div
+                          className={`proposal-item ${proposal.selected ? "active" : ""}`}
+                          key={proposal.id}
                         >
-                          Refine
+                          <button
+                            className="proposal-checkbox"
+                            aria-label={`Select proposal ${i + 1}`}
+                            aria-pressed={proposal.selected}
+                            disabled={geometryBusy || confirming}
+                            onClick={() =>
+                              update(
+                                (s) => ({
+                                  ...s,
+                                  proposals: s.proposals.map((p) =>
+                                    p.id === proposal.id
+                                      ? { ...p, selected: !p.selected }
+                                      : p,
+                                  ),
+                                }),
+                                false,
+                              )
+                            }
+                          >
+                            {proposal.selected && <Check size={12} />}
+                          </button>
+                          <span>
+                            Proposal {i + 1}
+                            <small>{Math.round(proposal.score * 100)}%</small>
+                          </span>
+                          <button
+                            className="text-button"
+                            onClick={() => refineProposal(proposal)}
+                            title="Refine with clicks"
+                            disabled={geometryBusy || confirming}
+                          >
+                            Refine
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        className="button primary full compact"
+                        disabled={
+                          !selectedProposals.length ||
+                          geometryBusy ||
+                          confirming
+                        }
+                        onClick={acceptProposals}
+                      >
+                        <CheckCheck size={15} /> Accept selected
+                      </button>
+                      <button
+                        className="button secondary full compact"
+                        disabled={
+                          selectedProposals.length < 2 ||
+                          geometryBusy ||
+                          confirming ||
+                          textBusy
+                        }
+                        onClick={() => void mergeProposals()}
+                        title="Combine selected proposals into one instance using the active class"
+                      >
+                        {mergingProposals ? (
+                          <LoaderCircle size={15} className="spin" />
+                        ) : (
+                          <Merge size={15} />
+                        )}
+                        Merge selected
+                      </button>
+                    </section>
+                  )}
+                  <section className="annotations-panel">
+                    {!state?.annotations.length &&
+                    !state?.draft &&
+                    !state?.proposals.length ? (
+                      <div className="objects-empty">
+                        <Layers3 size={27} strokeWidth={1} />
+                        <h3>No annotations</h3>
+                        <button
+                          className="button secondary compact"
+                          onClick={resumeDraft}
+                        >
+                          <Plus size={14} /> New object
                         </button>
                       </div>
-                    ))}
-                    <button
-                      className="button primary full compact"
-                      disabled={
-                        !selectedProposals.length || geometryBusy || confirming
-                      }
-                      onClick={acceptProposals}
-                    >
-                      <CheckCheck size={15} /> Accept selected
-                    </button>
-                    <button
-                      className="button secondary full compact"
-                      disabled={
-                        selectedProposals.length < 2 ||
-                        geometryBusy ||
-                        confirming ||
-                        textBusy
-                      }
-                      onClick={() => void mergeProposals()}
-                      title="Combine selected proposals into one instance using the active class"
-                    >
-                      {mergingProposals ? (
-                        <LoaderCircle size={15} className="spin" />
-                      ) : (
-                        <Merge size={15} />
-                      )}
-                      Merge selected
-                    </button>
-                  </section>
-                )}
-                <section className="annotations-panel">
-                  {!state?.annotations.length &&
-                  !state?.draft &&
-                  !state?.proposals.length ? (
-                    <div className="objects-empty">
-                      <Layers3 size={27} strokeWidth={1} />
-                      <h3>No annotations</h3>
-                      <button
-                        className="button secondary compact"
-                        onClick={resumeDraft}
-                      >
-                        <Plus size={14} /> New object
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="section-caption">CONFIRMED INSTANCES</div>
-                      {state?.annotations.map((a, i) => {
-                        const cat = project.categories.find(
-                          (c) => c.id === a.category_id,
-                        );
-                        return (
-                          <button
-                            className={`annotation-row ${selected === a.id ? "active" : ""}`}
-                            key={a.id}
-                            onClick={() => {
-                              setSelected(a.id);
-                              setTool("select");
-                              setVertex(null);
-                            }}
-                          >
-                            <i
-                              style={{ background: cat?.color || "#a29bcc" }}
-                            />
-                            <span>
-                              {cat?.name || "No class"}
-                              <small>
-                                #{String(i + 1).padStart(2, "0")}
-                                {a.components.length > 1
-                                  ? ` · ${a.components.length} parts`
-                                  : ""}
-                              </small>
-                            </span>
-                            {selected === a.id ? (
-                              <ChevronRight size={14} />
-                            ) : (
-                              <Check size={13} />
-                            )}
-                          </button>
-                        );
-                      })}
-                      <button
-                        className="text-button new-object"
-                        onClick={resumeDraft}
-                      >
-                        <Plus size={14} />{" "}
-                        {state?.draft ? "Resume draft" : "New object"}
-                      </button>
-                    </>
-                  )}
-                </section>
-                {selectedAnnotation && (
-                  <section className="selection-panel">
-                    <div className="panel-label">
-                      <span>Edit instance</span>
-                      <IconButton
-                        icon={Trash2}
-                        title={
-                          vertex ? "Delete selected vertex" : "Delete instance"
-                        }
-                        onClick={removeSelected}
-                      />
-                    </div>
-                    <select
-                      aria-label="Instance class"
-                      value={selectedAnnotation.category_id}
-                      onChange={(e) =>
-                        update((s) => ({
-                          ...s,
-                          annotations: s.annotations.map((a) =>
-                            a.id === selected
-                              ? { ...a, category_id: Number(e.target.value) }
-                              : a,
-                          ),
-                        }))
-                      }
-                    >
-                      {project.categories.map((c) => (
-                        <option value={c.id} key={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="field-note">
-                      Drag vertices to adjust the contour. Double-click an edge
-                      to add a vertex.
-                    </p>
-                    <div className="hole-cleanup">
-                      <label>
-                        <span>Holes up to</span>
-                        <input
-                          type="number"
-                          aria-label="Maximum hole area"
-                          title="Maximum enclosed hole area in original-image pixels"
-                          min={1}
-                          max={
-                            currentImage
-                              ? currentImage.width * currentImage.height
-                              : undefined
-                          }
-                          step={1}
-                          value={maxHoleArea}
-                          disabled={geometryBusy || confirming}
-                          onChange={(e) => setMaxHoleArea(e.target.value)}
-                        />
-                        <span>px²</span>
-                      </label>
-                      <button
-                        className="button secondary"
-                        type="button"
-                        title="Fill small enclosed gaps without changing the outer mask boundary. Undo restores the original mask."
-                        disabled={geometryBusy || confirming || !validHoleArea}
-                        onClick={() => void fillSmallHoles()}
-                      >
-                        Fill small holes
-                      </button>
-                    </div>
-                    {geometryBusy && (
-                      <span className="inline-status">
-                        <LoaderCircle className="spin" size={13} /> Updating
-                        mask…
-                      </span>
+                    ) : (
+                      <>
+                        <div className="section-caption">
+                          CONFIRMED INSTANCES
+                        </div>
+                        {state?.annotations.map((a, i) => {
+                          const cat = project.categories.find(
+                            (c) => c.id === a.category_id,
+                          );
+                          return (
+                            <button
+                              className={`annotation-row ${selected === a.id ? "active" : ""}`}
+                              key={a.id}
+                              onClick={() => {
+                                setSelected(a.id);
+                                setTool("select");
+                                setVertex(null);
+                              }}
+                            >
+                              <i
+                                style={{ background: cat?.color || "#a29bcc" }}
+                              />
+                              <span>
+                                {cat?.name || "No class"}
+                                <small>
+                                  #{String(i + 1).padStart(2, "0")}
+                                  {a.components.length > 1
+                                    ? ` · ${a.components.length} parts`
+                                    : ""}
+                                </small>
+                              </span>
+                              {selected === a.id ? (
+                                <ChevronRight size={14} />
+                              ) : (
+                                <Check size={13} />
+                              )}
+                            </button>
+                          );
+                        })}
+                        <button
+                          className="text-button new-object"
+                          onClick={resumeDraft}
+                        >
+                          <Plus size={14} />{" "}
+                          {state?.draft ? "Resume draft" : "New object"}
+                        </button>
+                      </>
                     )}
                   </section>
-                )}
-                <div className="inspector-bottom">
-                  <ClassPanel
-                    categories={project.categories}
-                    categoryId={categoryId}
-                    onSelect={setCategoryId}
-                    onEdit={(id) =>
-                      editCategory(project.categories.find((c) => c.id === id)!)
-                    }
-                    onCreate={() => editCategory("new")}
-                  />
-
-                  <label className="checkbox-label mask-box-toggle">
-                    <input
-                      type="checkbox"
-                      checked={showBoxes}
-                      onChange={(e) => setShowBoxes(e.target.checked)}
-                    />
-                    Show bounding boxes
-                  </label>
-                  <div className="opacity-control">
-                    <Eye size={14} />
-                    <span>Opacity</span>
-                    <input
-                      type="range"
-                      min="0.1"
-                      max="1"
-                      step="0.05"
-                      value={opacity}
-                      onChange={(e) => setOpacity(Number(e.target.value))}
-                      aria-label="Mask opacity"
-                    />
-                  </div>
-                </div>
-              </aside>
-            )}
-            <DetectionEditor
-              key={project.id || project.directory}
-              active={task === "detection"}
-              image={currentImage}
-              project={project}
-              workspace={workspace}
-              categoryId={categoryId}
-              setCategoryId={setCategoryId}
-              createClass={() => editCategory("new")}
-              editClass={(id) => {
-                const c = project.categories.find((c) => c.id === id);
-                if (c) editCategory(c);
-              }}
-              modelReady={modelReady}
-              blocked={
-                !!(
-                  projectDialog ||
-                  help ||
-                  categoryDialog ||
-                  relink ||
-                  conflictDialog ||
-                  uploadDialog ||
-                  visualDialogOpen ||
-                  exportDialog
-                )
-              }
-              onError={setToast}
-              navigate={(offset) => navigate(imageIndex + offset)}
-            />
-          </ResizableWorkspace>
-          <footer className="statusbar">
-            <div className={`save-status ${failedRecord ? "error" : ""}`}>
-              {failedRecord ? (
-                <>
-                  <AlertTriangle size={12} />
-                  <button
-                    onClick={() => {
-                      if (failedRecord[1].conflict) {
-                        setConflictImage(failedRecord[0]);
-                        setConflictDialog(true);
-                      } else void workspace.save(failedRecord[0]);
-                    }}
-                  >
-                    {failedRecord[1].conflict
-                      ? "Save conflict · review"
-                      : "Not saved · retry"}
-                  </button>
-                </>
-              ) : anySaving ? (
-                <>
-                  <LoaderCircle size={12} className="spin" /> Saving…
-                </>
-              ) : anyDirty ? (
-                <>
-                  <Circle size={8} fill="currentColor" /> Unsaved changes
-                </>
-              ) : (
-                <>
-                  <Check size={13} /> {hosted ? "Saved" : "Saved locally"}
-                </>
-              )}
-            </div>
-            <div className="status-middle">
-              {hosted && jobs.size ? (
-                <span className="hosted-job-status">
-                  <LoaderCircle size={12} className="spin" />
-                  {[...jobs.values()].some(
-                    (job) => job.status === "reconnecting",
-                  )
-                    ? "Reconnecting to inference…"
-                    : [...jobs.values()].some((job) =>
-                          ["running", "dispatched"].includes(job.status),
+                  {selectedAnnotation && (
+                    <section className="selection-panel">
+                      <div className="panel-label">
+                        <span>Edit instance</span>
+                        <IconButton
+                          icon={Trash2}
+                          title={
+                            vertex
+                              ? "Delete selected vertex"
+                              : "Delete instance"
+                          }
+                          onClick={removeSelected}
+                        />
+                      </div>
+                      <select
+                        aria-label="Instance class"
+                        value={selectedAnnotation.category_id}
+                        onChange={(e) =>
+                          update((s) => ({
+                            ...s,
+                            annotations: s.annotations.map((a) =>
+                              a.id === selected
+                                ? { ...a, category_id: Number(e.target.value) }
+                                : a,
+                            ),
+                          }))
+                        }
+                      >
+                        {project.categories.map((c) => (
+                          <option value={c.id} key={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="field-note">
+                        Drag vertices to adjust the contour. Double-click an
+                        edge to add a vertex.
+                      </p>
+                      <div className="hole-cleanup">
+                        <label>
+                          <span>Holes up to</span>
+                          <input
+                            type="number"
+                            aria-label="Maximum hole area"
+                            title="Maximum enclosed hole area in original-image pixels"
+                            min={1}
+                            max={
+                              currentImage
+                                ? currentImage.width * currentImage.height
+                                : undefined
+                            }
+                            step={1}
+                            value={maxHoleArea}
+                            disabled={geometryBusy || confirming}
+                            onChange={(e) => setMaxHoleArea(e.target.value)}
+                          />
+                          <span>px²</span>
+                        </label>
+                        <button
+                          className="button secondary"
+                          type="button"
+                          title="Fill small enclosed gaps without changing the outer mask boundary. Undo restores the original mask."
+                          disabled={
+                            geometryBusy || confirming || !validHoleArea
+                          }
+                          onClick={() => void fillSmallHoles()}
+                        >
+                          Fill small holes
+                        </button>
+                      </div>
+                      {geometryBusy && (
+                        <span className="inline-status">
+                          <LoaderCircle className="spin" size={13} /> Updating
+                          mask…
+                        </span>
+                      )}
+                    </section>
+                  )}
+                  <div className="inspector-bottom">
+                    <ClassPanel
+                      categories={project.categories}
+                      categoryId={categoryId}
+                      onSelect={setCategoryId}
+                      onEdit={(id) =>
+                        editCategory(
+                          project.categories.find((c) => c.id === id)!,
                         )
-                      ? "SAM 3 is processing…"
-                      : "Waiting for a GPU…"}
-                  <button onClick={abortAll}>Cancel requests</button>
-                </span>
-              ) : (
-                currentImage?.file_name || project.image_root
+                      }
+                      onCreate={() => editCategory("new")}
+                    />
+
+                    <label className="checkbox-label mask-box-toggle">
+                      <input
+                        type="checkbox"
+                        checked={showBoxes}
+                        onChange={(e) => setShowBoxes(e.target.checked)}
+                      />
+                      Show bounding boxes
+                    </label>
+                    <div className="opacity-control">
+                      <Eye size={14} />
+                      <span>Opacity</span>
+                      <input
+                        type="range"
+                        min="0.1"
+                        max="1"
+                        step="0.05"
+                        value={opacity}
+                        onChange={(e) => setOpacity(Number(e.target.value))}
+                        aria-label="Mask opacity"
+                      />
+                    </div>
+                  </div>
+                </aside>
               )}
-            </div>
-            <div>
-              {exportPath ? (
-                <a href={assetURL(exportPath)} download title={exportPath}>
-                  <Download size={12} /> {exportName}
-                </a>
-              ) : (
-                <>
-                  <Command size={11} />
-                  <span>Esc to suspend · ↵ to confirm</span>
-                </>
-              )}
-            </div>
-          </footer>
+              <DetectionEditor
+                key={project.id || project.directory}
+                active={task === "detection"}
+                image={currentImage}
+                project={project}
+                workspace={workspace}
+                categoryId={categoryId}
+                setCategoryId={setCategoryId}
+                createClass={() => editCategory("new")}
+                editClass={(id) => {
+                  const c = project.categories.find((c) => c.id === id);
+                  if (c) editCategory(c);
+                }}
+                modelReady={modelReady}
+                blocked={
+                  trainingVisible ||
+                  !!(
+                    projectDialog ||
+                    help ||
+                    categoryDialog ||
+                    relink ||
+                    conflictDialog ||
+                    uploadDialog ||
+                    visualDialogOpen ||
+                    exportDialog
+                  )
+                }
+                onError={setToast}
+                navigate={(offset) => navigate(imageIndex + offset)}
+              />
+            </ResizableWorkspace>
+            <footer className="statusbar">
+              <div className={`save-status ${failedRecord ? "error" : ""}`}>
+                {failedRecord ? (
+                  <>
+                    <AlertTriangle size={12} />
+                    <button
+                      onClick={() => {
+                        if (failedRecord[1].conflict) {
+                          setConflictImage(failedRecord[0]);
+                          setConflictDialog(true);
+                        } else void workspace.save(failedRecord[0]);
+                      }}
+                    >
+                      {failedRecord[1].conflict
+                        ? "Save conflict · review"
+                        : "Not saved · retry"}
+                    </button>
+                  </>
+                ) : anySaving ? (
+                  <>
+                    <LoaderCircle size={12} className="spin" /> Saving…
+                  </>
+                ) : anyDirty ? (
+                  <>
+                    <Circle size={8} fill="currentColor" /> Unsaved changes
+                  </>
+                ) : (
+                  <>
+                    <Check size={13} /> {hosted ? "Saved" : "Saved locally"}
+                  </>
+                )}
+              </div>
+              <div className="status-middle">
+                {hosted && jobs.size ? (
+                  <span className="hosted-job-status">
+                    <LoaderCircle size={12} className="spin" />
+                    {[...jobs.values()].some(
+                      (job) => job.status === "reconnecting",
+                    )
+                      ? "Reconnecting to inference…"
+                      : [...jobs.values()].some((job) =>
+                            ["running", "dispatched"].includes(job.status),
+                          )
+                        ? "SAM 3 is processing…"
+                        : "Waiting for a GPU…"}
+                    <button onClick={abortAll}>Cancel requests</button>
+                  </span>
+                ) : (
+                  currentImage?.file_name || project.image_root
+                )}
+              </div>
+              <div>
+                {exportPath ? (
+                  <a href={assetURL(exportPath)} download title={exportPath}>
+                    <Download size={12} /> {exportName}
+                  </a>
+                ) : (
+                  <>
+                    <Command size={11} />
+                    <span>Esc to suspend · ↵ to confirm</span>
+                  </>
+                )}
+              </div>
+            </footer>
+          </div>
         </>
       )}
       {exportDialog && (

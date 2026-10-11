@@ -34,6 +34,7 @@ class Settings:
     worker_grace_seconds: int = 5
     worker_poll_seconds: int = 5
     dispatcher_poll_milliseconds: int = 200
+    training_enabled: bool = False
     session_seconds: int = 7 * 86400
     min_free_disk_bytes: int = 100_000_000_000
 
@@ -61,6 +62,7 @@ class Settings:
         for item in fields(cls):
             if item.type is int and (value := os.environ.get("ANNOTATION_" + item.name.upper())):
                 values[item.name] = int(value)
+        values["training_enabled"] = os.environ.get("ANNOTATION_TRAINING_ENABLED", "0") == "1"
         return cls(**values)
 
     def validate(self):

@@ -1,0 +1,11 @@
+# Optional agent environment only. Install vendor-compatible torch/torchvision first.
+# The CPU web service must never install this file.
+ultralytics==8.4.175
+rfdetr[train]==1.11.2
+httpx==0.28.1
+
+# Shared original-pixel geometry and declarative agent contracts.
+shapely==2.1.2
+pycocotools==2.0.11
+pydantic==2.13.5
+pytorch-lightning==2.6.6

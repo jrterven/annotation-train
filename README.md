@@ -14,7 +14,10 @@ projects, Cloudflare R2 storage, PostgreSQL accounts and quotas, and a durable
 queue for remote SAM 3 workers. `run.py` still starts the original local app
 without Google, R2, or PostgreSQL. See [HOSTED.md](HOSTED.md) for configuration,
 deployment, backup/restore, and the release checks. Both modes support the same
-annotation tasks and exports. Model training is outside this application.
+annotation tasks and exports. Optional integrated training uses the user's own
+NVIDIA computers, with reviewed immutable datasets and an optional held-out test
+set. See [TRAINING.md](TRAINING.md) for setup and recovery. Hosted training remains
+disabled until the deployment's validation and migration gates are complete.
 
 ## Screenshots
 

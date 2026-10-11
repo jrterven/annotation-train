@@ -24,3 +24,7 @@ sample/
 *.key
 *credentials*.json
 *client_secret*.json
+*.pt
+*.pth
+*.ckpt
+*.safetensors
