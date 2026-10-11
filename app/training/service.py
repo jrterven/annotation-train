@@ -124,12 +124,21 @@ class TrainingService:
         # residues are collectable; incomplete manifests are never published.
         self.backend.retain(result)
         with self.repo.transaction() as records:
-            for previous in records.list("dataset"):
+            datasets = records.list("dataset")
+            for previous in datasets:
                 if previous["fingerprint"] == result["fingerprint"]:
                     return previous
+            # Keep the high-water mark even after the newest (or all) snapshots
+            # are deleted. Existing projects initialize it from retained data.
+            sequence = records.get("sequence", "dataset") or {"last_version": 0}
+            version = max(
+                sequence["last_version"],
+                max((row["version"] for row in datasets), default=0),
+            ) + 1
             result.update(
-                id=identity(), created_at=time.time(), version=len(records.list("dataset")) + 1
+                id=identity(), created_at=time.time(), version=version
             )
+            records.put("sequence", "dataset", {"last_version": version})
             records.put("dataset", result["id"], result)
         return result
 

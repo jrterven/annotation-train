@@ -16,6 +16,7 @@ from sqlalchemy import select
 from app import main
 from app.geometry import mask_payload
 from app.training.catalog import catalog
+from app.training.agent import server_url
 from app.training.control import LocalControl
 from app.hosted.models import TrainingRecord, User, ResourceCounter
 from test_hosted_backend import hosted
@@ -156,6 +157,37 @@ def prepare(env, task="detection", test=True, family="yolo26"):
     assert assigned["work"]["id"] == run["id"]
     assert ok(agent.post(env["agent_root"] + "/claim", json={"slot": "0"})) is None
     return agent, dataset, run, assigned
+
+
+def test_agent_discovers_real_local_and_hosted_loopback_routes(environment):
+    env = environment
+    assert server_url("http://localhost:8765", client=env["client"]) == (
+        "http://localhost:8765" + env["agent_root"]
+    )
+
+
+def test_dataset_versions_survive_deleting_older_latest_and_all_snapshots(environment):
+    client, base = environment["client"], environment["root"] + "/training"
+    overview = ok(client.get(base, params={"task": "detection"}))
+    ok(client.post(base + "/reviews", json={
+        "task": "detection", "images": {im["id"]: im["revision"] for im in overview["images"]}
+    }))
+
+    def create(seed, version):
+        body = {"task": "detection", "seed": seed}
+        dataset = ok(client.post(base + "/datasets", json=body))
+        assert dataset["version"] == version
+        assert ok(client.post(base + "/datasets", json=body)) == dataset
+        return dataset["id"]
+
+    first, second = create(1, 1), create(2, 2)
+    ok(client.delete(base + "/datasets/" + first))
+    third = create(3, 3)
+    ok(client.delete(base + "/datasets/" + third))
+    fourth = create(4, 4)
+    for id in (second, fourth):
+        ok(client.delete(base + "/datasets/" + id))
+    create(5, 5)
 
 
 def update(env, agent, assigned, sequence=0, **event):
