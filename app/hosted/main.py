@@ -176,7 +176,7 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
     @app.get("/api/config")
     @app.get("/api/v1/config")
     def config():
-        return {"mode": "hosted"}
+        return {"mode": "hosted", "training_enabled": settings.training_enabled}
 
     @app.get("/api/health")
     @app.get("/api/v1/health")
@@ -243,7 +243,9 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             if not project:
                 raise HTTPException(404, "Project not found")
             recover_project_locked(settings, session, counter, project, objects)
-            now, total = utcnow(), project.metadata_bytes
+            from .models import TrainingRecord
+            training_rows = list(session.scalars(select(TrainingRecord).where(TrainingRecord.project_id == project_id)))
+            now, total = utcnow(), project.metadata_bytes + sum(row.size_bytes for row in training_rows)
             project.deleted_at = now
             for image in session.scalars(select(ImageObject).where(ImageObject.project_id == project_id)):
                 if image.status == "ready":
@@ -653,6 +655,9 @@ def create_app(settings: Settings | None = None, *, database=None, objects=None)
             data = objects.get(f"exports/{project_id}/anotaciones.coco.json")
         return Response(data, media_type="application/json",
                         headers={"Content-Disposition": 'attachment; filename="anotaciones.coco.json"'})
+
+    from .training import install as install_training
+    install_training(app)
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     # static assets have no access to data_dir/cache_dir; legal pages use the SPA.

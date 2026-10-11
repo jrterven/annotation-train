@@ -398,6 +398,68 @@ def test_orphaned_staging_generations_expire_after_one_day(setup):
     assert result["local_artifacts"] == 1 and not stale.exists() and fresh.exists()
 
 
+def seed_training_operations(value):
+    from app.hosted.training import HostedBackend
+    backend = HostedBackend(value.settings, value.db, value.objects, value.uid, value.pid)
+    artifact_id, dataset_id = str(uuid4()), str(uuid4())
+    model = b"disposable opaque training model"
+    artifact = {"id": artifact_id, "name": "model.pt", "status": "ready",
+                "sha256": hashlib.sha256(model).hexdigest(), "size_bytes": len(model),
+                "object_key": f"projects/{value.pid}/training/{artifact_id}"}
+    value.objects.put(artifact["object_key"], model)
+    cases = []
+    with backend.repo.transaction() as records:
+        records.put("artifact", artifact_id, artifact)
+        records.put("dataset", dataset_id, {"id": dataset_id, "counts": {"test": 1},
+                                           "classes": [{"category_id": 1}]})
+        for operation, status in [(op, state) for op in ("evaluate", "predict")
+                                  for state in ("queued", "running", "superseded")]:
+            run_id, op_id = str(uuid4()), str(uuid4())
+            key = "evaluation" if operation == "evaluate" else "prediction"
+            parent_status = "completed" if status == "superseded" else status
+            parent_id = str(uuid4()) if status == "superseded" else op_id
+            records.put("run", run_id, {"id": run_id, "status": "completed", "events": 2,
+                "task": "detection", "dataset_id": dataset_id, "artifacts": [artifact],
+                "model": {}, "parameters": {}, "runtime": {}, "device_id": "test-device",
+                key: {"id": parent_id, "status": parent_status}})
+            records.put("operation", op_id, {"id": op_id, "run_id": run_id,
+                "operation": operation, "status": "queued" if status == "superseded" else status,
+                "events": 1, "control": None, "lease_until": 2**40})
+            cases.append((run_id, op_id, operation, status, parent_id))
+    return cases
+
+
+def assert_restored_training_operations(value, db, directory, cases):
+    from app.hosted.training import HostedBackend
+    from app.training.coordinator import enqueue_operation
+    from app.training.protocol import PredictionInput
+    from app.training.service import TrainingService
+    backend = HostedBackend(replace(value.settings, data_dir=directory), db, value.objects,
+                            value.uid, value.pid)
+    with backend.repo.transaction() as records:
+        for run_id, op_id, operation, status, parent_id in cases:
+            work, parent = records.get("operation", op_id), records.get("run", run_id)
+            key = "evaluation" if operation == "evaluate" else "prediction"
+            assert work["status"] == "interrupted" and work["lease_until"] == 0
+            assert parent["status"] == "completed"
+            assert parent[key] == {"id": parent_id,
+                                   "status": "completed" if status == "superseded" else "interrupted"}
+    for run_id, op_id, operation, status, _ in cases:
+        if status == "superseded":
+            continue
+        result = enqueue_operation(TrainingService(backend), run_id, operation,
+                                   PredictionInput(image_ids=[1]) if operation == "predict" else None)
+        assert result["status"] == "queued" and result["id"] != op_id
+
+
+def test_restore_interrupts_parent_operations_and_allows_explicit_retry(setup):
+    cases = seed_training_operations(setup)
+    manifest = backup(setup.settings, setup.db, setup.objects)
+    restored, directory = target_for(setup)
+    restore(setup.settings, setup.objects, manifest, restored, directory)
+    assert_restored_training_operations(setup, restored, directory, cases)
+
+
 def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
     """Opt-in integration against an explicitly supplied disposable PG instance.
 
@@ -415,6 +477,7 @@ def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
     if not dsn_file:
         pytest.skip("No isolated PostgreSQL test connection configured")
     mixed_state = seed_mixed_annotations(setup)
+    training_cases = seed_training_operations(setup)
     url = make_url(Path(dsn_file).read_text().strip())
     admin = create_engine(url, isolation_level="AUTOCOMMIT")
     names = ["annotation_maintenance_" + uuid4().hex for _ in range(2)]
@@ -457,7 +520,8 @@ def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
         assert manifest["metadata"]["format"] == "postgresql-custom"
         target_db = Database(settings, engine=engines[1])
         destination_dir = setup.root / "pg-restored-data"
-        assert restore(settings, setup.objects, key, target_db, destination_dir) == {"projects": 1, "objects": 2}
+        assert restore(settings, setup.objects, key, target_db, destination_dir) == {"projects": 1, "objects": 3}
+        assert_restored_training_operations(setup, target_db, destination_dir, training_cases)
         with target_db.session() as session:
             assert session.get(Project, setup.pid).name == "Carrots updated"
             assert session.get(User, setup.uid).email == "owner@example.test"
@@ -571,3 +635,70 @@ def test_chunked_upload_expiry_and_crash_leftovers_are_collected(setup):
     assert (directory / f'{active}.part').read_bytes() == b'partial'
     with value.db.session() as session:
         assert session.get(User, value.uid).reserved_bytes == 20
+
+
+def test_training_models_survive_backup_restore_and_keep_private_references(setup, monkeypatch):
+    from app.hosted.training import HostedBackend
+    from app.hosted.models import TrainingNode, TrainingRecord
+    value = setup
+    artifact_id, run_id = str(uuid4()), str(uuid4())
+    model = b"opaque model bytes: never unpickled on the CPU server"
+    model_key = f"projects/{value.pid}/training/{artifact_id}"
+    value.objects.put(model_key, model)
+    backend = HostedBackend(value.settings, value.db, value.objects, value.uid, value.pid)
+    with backend.repo.transaction() as records:
+        records.put("run", run_id, {"id": run_id, "status": "running", "lease_until": 2**40, "events": 1})
+        records.put("artifact", artifact_id, {"id": artifact_id, "work_id": run_id, "status": "ready", "name": "model.pt",
+            "size_bytes": len(model), "sha256": hashlib.sha256(model).hexdigest(), "object_key": model_key})
+        records.session.add(TrainingNode(id=str(uuid4()), user_id=value.uid, token_hash="old-agent-token-hash",
+                                         value={"leases": {}}, revoked=False))
+    key = backup(value.settings, value.db, value.objects)
+    manifest = load_manifest(value.settings, value.objects, key)
+    assert model_key in {item["key"] for item in manifest["objects"]}
+    age(value.objects, model_key, utcnow() - timedelta(days=2))
+    reconcile(value.settings, value.db, value.objects)
+    assert value.objects.get(model_key) == model
+    original_get = value.objects.get
+    def bounded_get(key):
+        assert key != model_key, "Model restoration must verify weights using bounded streams"
+        return original_get(key)
+    monkeypatch.setattr(value.objects, "get", bounded_get)
+    restored, target = target_for(value)
+    restore(value.settings, value.objects, key, restored, target)
+    with restored.session() as session:
+        assert session.get(TrainingRecord, (value.pid,"run",run_id)).value["status"] == "interrupted"
+        assert session.scalar(select(TrainingNode)).revoked
+        assert session.get(TrainingRecord,(value.pid,"artifact",artifact_id)).value["sha256"] == hashlib.sha256(model).hexdigest()
+
+
+def test_abandoned_training_upload_releases_quota_and_local_bytes(setup):
+    from app.hosted.training import HostedBackend
+    from app.hosted.models import TrainingRecord
+    value=setup; run_id, artifact_id = str(uuid4()), str(uuid4())
+    backend=HostedBackend(value.settings,value.db,value.objects,value.uid,value.pid)
+    with backend.repo.transaction() as records:
+        records.put("run",run_id,{"id":run_id,"status":"failed"})
+        records.put("artifact",artifact_id,{"id":artifact_id,"work_id":run_id,"status":"uploading","size_bytes":10000,
+            "created_at":(utcnow()-timedelta(days=2)).timestamp(),"object_key":f"projects/{value.pid}/training/{artifact_id}"})
+    upload=value.settings.data_dir/"training-uploads"/artifact_id
+    upload.parent.mkdir();upload.write_bytes(b"partial")
+    with value.db.session() as session:
+        before=session.get(User,value.uid).storage_bytes
+    reconcile(value.settings,value.db,value.objects)
+    with value.db.session() as session:
+        assert session.get(TrainingRecord,(value.pid,"artifact",artifact_id)) is None
+        assert session.get(User,value.uid).storage_bytes < before-10000
+    assert not upload.exists()
+
+
+def test_deleted_training_upload_crash_residue_is_collected(setup):
+    directory = setup.settings.data_dir / "training-uploads"
+    directory.mkdir(parents=True)
+    orphan = directory / str(uuid4())
+    fresh = directory / str(uuid4())
+    orphan.write_bytes(b"unreferenced")
+    fresh.write_bytes(b"new")
+    old = (utcnow() - timedelta(days=2)).timestamp()
+    os.utime(orphan, (old, old))
+    reconcile(setup.settings, setup.db, setup.objects)
+    assert not orphan.exists() and fresh.exists()

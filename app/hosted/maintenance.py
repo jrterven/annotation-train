@@ -76,6 +76,17 @@ def _verified(objects, descriptor):
     return data
 
 
+def _verify_stream(objects, descriptor):
+    """Weights can be gigabytes; verification must use bounded CPU memory."""
+    checksum, size = hashlib.sha256(), 0
+    with objects.open_stream(descriptor["key"]) as stream:
+        while block := stream.read(1024 * 1024):
+            checksum.update(block)
+            size += len(block)
+    if size != descriptor["size_bytes"] or checksum.hexdigest() != descriptor["sha256"]:
+        raise ValueError("Backup or image checksum mismatch")
+
+
 def _validate_descriptor(item):
     if not isinstance(item, dict) or not re.fullmatch(r"[a-f0-9]{64}", item.get("sha256", "")):
         raise ValueError("Invalid backup checksum")
@@ -113,10 +124,12 @@ def load_manifest(settings, objects, key):
     for item in value["objects"]:
         _validate_descriptor(item)
         components = item["key"].split("/")
-        if len(components) != 5 or components[0] != "projects" or components[2] != "images":
+        image_key = len(components) == 5 and components[2] == "images" and components[4] in {"original", "thumbnail.png"}
+        training_key = len(components) == 4 and components[2] == "training"
+        if not (image_key or training_key) or components[0] != "projects":
             raise ValueError("Invalid original object key")
         _uuid(components[1]); _uuid(components[3])
-        if components[1] not in project_ids or components[4] not in {"original", "thumbnail.png"}:
+        if components[1] not in project_ids:
             raise ValueError("Invalid image object reference")
         if item["key"] in object_keys:
             raise ValueError("Duplicate image object reference")
@@ -247,6 +260,13 @@ def backup(settings, db, objects, now=None):
                     thumbnail_key = _thumbnail(image.object_key)
                     thumb = objects.get(thumbnail_key)
                     manifest["objects"].append(_descriptor(thumbnail_key, thumb))
+                from .models import TrainingRecord
+                for artifact in session.scalars(select(TrainingRecord).where(
+                        TrainingRecord.project_id.in_(active), TrainingRecord.kind == "artifact")):
+                    value = artifact.value
+                    if value.get("status") == "ready":
+                        manifest["objects"].append({"key": value["object_key"], "sha256": value["sha256"],
+                                                    "size_bytes": value["size_bytes"]})
                 if db.engine.dialect.name == "postgresql":
                     snapshot = session.scalar(text("SELECT pg_export_snapshot()"))
                     destination = directory / "metadata.dump"
@@ -377,6 +397,31 @@ def reconcile(settings, db, objects, now=None):
                 collectible.update(keys - protected)
             else:
                 referenced.update(keys)
+        from .models import TrainingRecord, TrainingPairing
+        from .training import PostgresRecords
+        from app.training.service import expire
+        for project in projects:
+            if project.deleted_at is None:
+                training = PostgresRecords(session, project, counter, settings)
+                expire(training)
+                for value in training.list("artifact"):
+                    work = training.get("run", value["work_id"])
+                    if value["status"] != "ready" and (not work or work["status"] not in {"preparing", "running", "pausing", "syncing"}) and value["created_at"] < now.timestamp() - ORPHAN_GRACE.total_seconds():
+                        training.delete("artifact", value["id"])
+                        (settings.data_dir / "training-uploads" / value["id"]).unlink(missing_ok=True)
+        session.execute(delete(TrainingPairing).where(TrainingPairing.expires_at <= now.replace(tzinfo=None)))
+        upload_ids = set()
+        for row in session.scalars(select(TrainingRecord).where(TrainingRecord.kind == "artifact")):
+            value = row.value
+            upload_ids.add(value["id"])
+            project = project_map.get(row.project_id)
+            if project and project.deleted_at is None and value.get("status") == "ready":
+                referenced.add(value["object_key"])
+        upload_root = settings.data_dir / "training-uploads"
+        if upload_root.is_dir():
+            for path in upload_root.iterdir():
+                if path.is_file() and path.name not in upload_ids and path.stat().st_mtime < now.timestamp() - ORPHAN_GRACE.total_seconds():
+                    path.unlink(missing_ok=True)
         # Retained manifest references always win, including recently deleted
         # projects and originals needed to recover an older snapshot.
         for entry in entries:
@@ -429,6 +474,7 @@ def reconcile(settings, db, objects, now=None):
             # Usage was released when access was revoked. Remove filenames and
             # tombstones only after their backup and execution references end.
             session.execute(delete(ImageObject).where(ImageObject.project_id == project.id))
+            session.execute(delete(TrainingRecord).where(TrainingRecord.project_id == project.id))
             session.delete(project)
             result["deleted_project_records"] += 1
         result["local_artifacts"] = _cleanup_local(settings, now, set(session.scalars(select(MetadataMutation.id))),
@@ -465,7 +511,7 @@ def restore(settings, objects, manifest_key, target_db, target_data_dir):
                 if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValueError("Project backup integrity check failed")
         for item in manifest["objects"]:
-            _verified(objects, item)
+            _verify_stream(objects, item)
         # Verify originals before changing either destination. R2 object keys
         # are shared with the source backup and cannot be restored from nothing.
         if metadata_format == "sqlite":
@@ -479,10 +525,31 @@ def restore(settings, objects, manifest_key, target_db, target_data_dir):
                       f"--dbname={make_url(url).database}", str(metadata)], url)
         target.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.replace(projects_path, target / "projects")
+    target_db.create_schema()  # Additive tables also support backups made before training.
     with target_db.session() as session:
-        target_db.global_lock(session)
+        counter = target_db.global_lock(session)
         session.execute(delete(AuthSession))
         session.execute(delete(AuthFlow))
+        from .models import TrainingNode, TrainingPairing
+        from .training import PostgresRecords
+        session.execute(delete(TrainingPairing))
+        for node in session.scalars(select(TrainingNode)):
+            node.revoked = True
+            node.value = {**node.value, "leases": {}}
+        for project in session.scalars(select(Project).where(Project.deleted_at.is_(None))):
+            training = PostgresRecords(session, project, counter, settings)
+            for kind in ("run", "operation"):
+                for work in training.list(kind):
+                    if work["status"] in {"queued", "preparing", "running", "pausing", "syncing"}:
+                        work.update(status="interrupted", control=None, lease_until=0, events=work.get("events", 0)+1)
+                        training.put(kind, work["id"], work)
+                        if kind == "operation":
+                            parent = training.get("run", work["run_id"])
+                            key = "evaluation" if work["operation"] == "evaluate" else "prediction"
+                            if parent and parent.get(key, {}).get("id") == work["id"]:
+                                parent[key]["status"] = "interrupted"
+                                parent["events"] = parent.get("events", 0) + 1
+                                training.put("run", parent["id"], parent)
         for job in session.scalars(select(Job).where(Job.status.in_(["queued", "running"])).with_for_update()):
             job.status, job.error, job.finished_at = "failed", "Cancelled during backup restoration; submit a new request", utcnow()
             job.cancel_requested = True
