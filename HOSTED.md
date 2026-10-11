@@ -319,3 +319,52 @@ v2-compatible releases can retain the column; never drop it while new readers
 run. This change does not alter project SQLite schemas, annotation revisions,
 worker protocols or quota accounting. Backups naturally include the new column;
 restoring a pre-column backup requires schema initialization before new readers.
+## Training rollout and rollback
+
+Training is an independent protocol, with no change to the SAM worker queue.
+`ANNOTATION_TRAINING_ENABLED=0` is the default and hides the UI and rejects training
+API/agent requests. See [TRAINING.md](TRAINING.md) for user setup and contracts.
+The web image remains CPU-only. Local mode uses a separate per-project
+`training/metadata.sqlite3`; annotation SQLite format v2 does not change.
+
+The additive PostgreSQL tables are `training_records`, `training_nodes` and
+`training_pairings`. Schema initialization creates them under the existing schema
+lock. Records are scoped to an owned project; node credentials and expiring
+single-use codes are hashed and scoped to their owner. Private original objects
+are shared by reference. Weights use `projects/<project UUID>/training/<artifact
+UUID>` and never use the 24-hour export expiry. Dataset metadata, metrics, saved
+evaluation/prediction results, model bytes and reserved output budgets count
+toward account/global quotas. Admission reserves event space and uploads reserve
+their declared bytes before accepting data. Project/run deletion releases charged
+metadata; reconciliation preserves objects referenced by retained backups.
+
+Before enabling writes:
+
+1. Take and verify a coordinated PostgreSQL/project/object backup. Keep training
+   disabled while installing the additive schema with the new CPU image.
+2. Stop old maintenance instances. Upgrade all backup/reconciliation processes
+   first and verify a disposable model backup/restore. Old maintenance cannot
+   recognize the new private model references and must never run after activation.
+3. Drain project mutations and upgrade every web instance. A mixed fleet must
+   not admit training writes: old readers cannot account for training resources
+   during project deletion. SAM workers need no protocol or runtime upgrade.
+4. Verify both GPU architectures privately, agent revocation, concurrent GPU
+   reservations, upload recovery, quotas, SSE reconnects and the full review →
+   train → optional test → proposal cycle. Enable the flag only after these
+   checks and record immutable component versions and private evidence.
+
+Backups include training metadata and ready-model object references. Restoration
+verifies large object hashes by streaming, initializes missing additive tables
+for older backups, clears pairing codes, revokes agent credentials and marks
+active work interrupted. Re-link each computer with its existing private state
+directory before resuming. Local resume checkpoints are not in hosted backups.
+
+For rollback, first close new training admission at ingress while allowing active
+agent transport to drain, or cancel active work and wait for supervisor shutdown.
+Then disable the flag and keep training-aware maintenance and quota/deletion
+readers. Preserve new tables, model objects, snapshots and agent checkpoints.
+Do not drop tables or downgrade to unaware maintenance after training writes.
+An older incompatible application requires a coordinated compatible backup
+restored into empty destinations, with newer data retained separately; reverting
+source alone does not reverse persisted writes. Re-enabling does not automatically
+restart interrupted executions.

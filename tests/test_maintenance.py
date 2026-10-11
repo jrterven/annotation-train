@@ -571,3 +571,70 @@ def test_chunked_upload_expiry_and_crash_leftovers_are_collected(setup):
     assert (directory / f'{active}.part').read_bytes() == b'partial'
     with value.db.session() as session:
         assert session.get(User, value.uid).reserved_bytes == 20
+
+
+def test_training_models_survive_backup_restore_and_keep_private_references(setup, monkeypatch):
+    from app.hosted.training import HostedBackend
+    from app.hosted.models import TrainingNode, TrainingRecord
+    value = setup
+    artifact_id, run_id = str(uuid4()), str(uuid4())
+    model = b"opaque model bytes: never unpickled on the CPU server"
+    model_key = f"projects/{value.pid}/training/{artifact_id}"
+    value.objects.put(model_key, model)
+    backend = HostedBackend(value.settings, value.db, value.objects, value.uid, value.pid)
+    with backend.repo.transaction() as records:
+        records.put("run", run_id, {"id": run_id, "status": "running", "lease_until": 2**40, "events": 1})
+        records.put("artifact", artifact_id, {"id": artifact_id, "work_id": run_id, "status": "ready", "name": "model.pt",
+            "size_bytes": len(model), "sha256": hashlib.sha256(model).hexdigest(), "object_key": model_key})
+        records.session.add(TrainingNode(id=str(uuid4()), user_id=value.uid, token_hash="old-agent-token-hash",
+                                         value={"leases": {}}, revoked=False))
+    key = backup(value.settings, value.db, value.objects)
+    manifest = load_manifest(value.settings, value.objects, key)
+    assert model_key in {item["key"] for item in manifest["objects"]}
+    age(value.objects, model_key, utcnow() - timedelta(days=2))
+    reconcile(value.settings, value.db, value.objects)
+    assert value.objects.get(model_key) == model
+    original_get = value.objects.get
+    def bounded_get(key):
+        assert key != model_key, "Model restoration must verify weights using bounded streams"
+        return original_get(key)
+    monkeypatch.setattr(value.objects, "get", bounded_get)
+    restored, target = target_for(value)
+    restore(value.settings, value.objects, key, restored, target)
+    with restored.session() as session:
+        assert session.get(TrainingRecord, (value.pid,"run",run_id)).value["status"] == "interrupted"
+        assert session.scalar(select(TrainingNode)).revoked
+        assert session.get(TrainingRecord,(value.pid,"artifact",artifact_id)).value["sha256"] == hashlib.sha256(model).hexdigest()
+
+
+def test_abandoned_training_upload_releases_quota_and_local_bytes(setup):
+    from app.hosted.training import HostedBackend
+    from app.hosted.models import TrainingRecord
+    value=setup; run_id, artifact_id = str(uuid4()), str(uuid4())
+    backend=HostedBackend(value.settings,value.db,value.objects,value.uid,value.pid)
+    with backend.repo.transaction() as records:
+        records.put("run",run_id,{"id":run_id,"status":"failed"})
+        records.put("artifact",artifact_id,{"id":artifact_id,"work_id":run_id,"status":"uploading","size_bytes":10000,
+            "created_at":(utcnow()-timedelta(days=2)).timestamp(),"object_key":f"projects/{value.pid}/training/{artifact_id}"})
+    upload=value.settings.data_dir/"training-uploads"/artifact_id
+    upload.parent.mkdir();upload.write_bytes(b"partial")
+    with value.db.session() as session:
+        before=session.get(User,value.uid).storage_bytes
+    reconcile(value.settings,value.db,value.objects)
+    with value.db.session() as session:
+        assert session.get(TrainingRecord,(value.pid,"artifact",artifact_id)) is None
+        assert session.get(User,value.uid).storage_bytes < before-10000
+    assert not upload.exists()
+
+
+def test_deleted_training_upload_crash_residue_is_collected(setup):
+    directory = setup.settings.data_dir / "training-uploads"
+    directory.mkdir(parents=True)
+    orphan = directory / str(uuid4())
+    fresh = directory / str(uuid4())
+    orphan.write_bytes(b"unreferenced")
+    fresh.write_bytes(b"new")
+    old = (utcnow() - timedelta(days=2)).timestamp()
+    os.utime(orphan, (old, old))
+    reconcile(setup.settings, setup.db, setup.objects)
+    assert not orphan.exists() and fresh.exists()

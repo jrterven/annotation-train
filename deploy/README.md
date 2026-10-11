@@ -180,3 +180,11 @@ For Vite, keep the backend at port 8765, set the public origin to
 `http://localhost:5173`, and use Vite's API proxy. Both registered Google callback
 URIs end in `/api/v1/auth/google/callback`. The original `python run.py` requires
 none of these hosted credentials.
+## Optional training agents
+
+Keep `ANNOTATION_TRAINING_ENABLED=0` until the
+[training rollout](../HOSTED.md#training-rollout-and-rollback) is complete.
+Upgrade maintenance and all quota/deletion readers before enabling training
+writes. Agents are installed on user-owned computers with outgoing HTTPS; they
+do not run in the hosted Compose stack or replace SAM workers. See
+[TRAINING.md](../TRAINING.md) for installation, runtime pinning and recovery.
