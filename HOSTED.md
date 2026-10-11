@@ -356,7 +356,10 @@ Before enabling writes:
 Backups include training metadata and ready-model object references. Restoration
 verifies large object hashes by streaming, initializes missing additive tables
 for older backups, clears pairing codes, revokes agent credentials and marks
-active work interrupted. Re-link each computer with its existing private state
+active work interrupted, including each run's evaluation/prediction status so an
+explicit retry can be queued. Completed results and newer operation references
+are preserved. This recovery correction needs no schema or agent protocol change.
+Re-link each computer with its existing private state
 directory before resuming. Local resume checkpoints are not in hosted backups.
 
 For rollback, first close new training admission at ingress while allowing active

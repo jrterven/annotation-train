@@ -398,6 +398,68 @@ def test_orphaned_staging_generations_expire_after_one_day(setup):
     assert result["local_artifacts"] == 1 and not stale.exists() and fresh.exists()
 
 
+def seed_training_operations(value):
+    from app.hosted.training import HostedBackend
+    backend = HostedBackend(value.settings, value.db, value.objects, value.uid, value.pid)
+    artifact_id, dataset_id = str(uuid4()), str(uuid4())
+    model = b"disposable opaque training model"
+    artifact = {"id": artifact_id, "name": "model.pt", "status": "ready",
+                "sha256": hashlib.sha256(model).hexdigest(), "size_bytes": len(model),
+                "object_key": f"projects/{value.pid}/training/{artifact_id}"}
+    value.objects.put(artifact["object_key"], model)
+    cases = []
+    with backend.repo.transaction() as records:
+        records.put("artifact", artifact_id, artifact)
+        records.put("dataset", dataset_id, {"id": dataset_id, "counts": {"test": 1},
+                                           "classes": [{"category_id": 1}]})
+        for operation, status in [(op, state) for op in ("evaluate", "predict")
+                                  for state in ("queued", "running", "superseded")]:
+            run_id, op_id = str(uuid4()), str(uuid4())
+            key = "evaluation" if operation == "evaluate" else "prediction"
+            parent_status = "completed" if status == "superseded" else status
+            parent_id = str(uuid4()) if status == "superseded" else op_id
+            records.put("run", run_id, {"id": run_id, "status": "completed", "events": 2,
+                "task": "detection", "dataset_id": dataset_id, "artifacts": [artifact],
+                "model": {}, "parameters": {}, "runtime": {}, "device_id": "test-device",
+                key: {"id": parent_id, "status": parent_status}})
+            records.put("operation", op_id, {"id": op_id, "run_id": run_id,
+                "operation": operation, "status": "queued" if status == "superseded" else status,
+                "events": 1, "control": None, "lease_until": 2**40})
+            cases.append((run_id, op_id, operation, status, parent_id))
+    return cases
+
+
+def assert_restored_training_operations(value, db, directory, cases):
+    from app.hosted.training import HostedBackend
+    from app.training.coordinator import enqueue_operation
+    from app.training.protocol import PredictionInput
+    from app.training.service import TrainingService
+    backend = HostedBackend(replace(value.settings, data_dir=directory), db, value.objects,
+                            value.uid, value.pid)
+    with backend.repo.transaction() as records:
+        for run_id, op_id, operation, status, parent_id in cases:
+            work, parent = records.get("operation", op_id), records.get("run", run_id)
+            key = "evaluation" if operation == "evaluate" else "prediction"
+            assert work["status"] == "interrupted" and work["lease_until"] == 0
+            assert parent["status"] == "completed"
+            assert parent[key] == {"id": parent_id,
+                                   "status": "completed" if status == "superseded" else "interrupted"}
+    for run_id, op_id, operation, status, _ in cases:
+        if status == "superseded":
+            continue
+        result = enqueue_operation(TrainingService(backend), run_id, operation,
+                                   PredictionInput(image_ids=[1]) if operation == "predict" else None)
+        assert result["status"] == "queued" and result["id"] != op_id
+
+
+def test_restore_interrupts_parent_operations_and_allows_explicit_retry(setup):
+    cases = seed_training_operations(setup)
+    manifest = backup(setup.settings, setup.db, setup.objects)
+    restored, directory = target_for(setup)
+    restore(setup.settings, setup.objects, manifest, restored, directory)
+    assert_restored_training_operations(setup, restored, directory, cases)
+
+
 def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
     """Opt-in integration against an explicitly supplied disposable PG instance.
 
@@ -415,6 +477,7 @@ def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
     if not dsn_file:
         pytest.skip("No isolated PostgreSQL test connection configured")
     mixed_state = seed_mixed_annotations(setup)
+    training_cases = seed_training_operations(setup)
     url = make_url(Path(dsn_file).read_text().strip())
     admin = create_engine(url, isolation_level="AUTOCOMMIT")
     names = ["annotation_maintenance_" + uuid4().hex for _ in range(2)]
@@ -457,7 +520,8 @@ def test_postgres_exported_snapshot_roundtrip(setup, monkeypatch):
         assert manifest["metadata"]["format"] == "postgresql-custom"
         target_db = Database(settings, engine=engines[1])
         destination_dir = setup.root / "pg-restored-data"
-        assert restore(settings, setup.objects, key, target_db, destination_dir) == {"projects": 1, "objects": 2}
+        assert restore(settings, setup.objects, key, target_db, destination_dir) == {"projects": 1, "objects": 3}
+        assert_restored_training_operations(setup, target_db, destination_dir, training_cases)
         with target_db.session() as session:
             assert session.get(Project, setup.pid).name == "Carrots updated"
             assert session.get(User, setup.uid).email == "owner@example.test"

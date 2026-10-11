@@ -543,6 +543,13 @@ def restore(settings, objects, manifest_key, target_db, target_data_dir):
                     if work["status"] in {"queued", "preparing", "running", "pausing", "syncing"}:
                         work.update(status="interrupted", control=None, lease_until=0, events=work.get("events", 0)+1)
                         training.put(kind, work["id"], work)
+                        if kind == "operation":
+                            parent = training.get("run", work["run_id"])
+                            key = "evaluation" if work["operation"] == "evaluate" else "prediction"
+                            if parent and parent.get(key, {}).get("id") == work["id"]:
+                                parent[key]["status"] = "interrupted"
+                                parent["events"] = parent.get("events", 0) + 1
+                                training.put("run", parent["id"], parent)
         for job in session.scalars(select(Job).where(Job.status.in_(["queued", "running"])).with_for_update()):
             job.status, job.error, job.finished_at = "failed", "Cancelled during backup restoration; submit a new request", utcnow()
             job.cancel_requested = True
