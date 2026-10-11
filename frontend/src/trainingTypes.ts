@@ -80,6 +80,7 @@ export type TrainingRun = {
   };
 };
 export type TrainingOverview = {
+  active_runs?: number;
   catalog: TrainingModel[];
   images: ReviewImage[];
   datasets: DatasetSnapshot[];

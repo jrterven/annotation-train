@@ -2221,3 +2221,249 @@ kbd {
   cursor: col-resize;
   user-select: none;
 }
+
+/* Training is a project workspace, keeping the annotation canvas mounted. */
+.annotation-workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.annotation-workspace[hidden],
+.training-workspace[hidden] {
+  display: none;
+}
+.project-workspaces {
+  display: flex;
+  gap: 4px;
+}
+.project-workspaces button {
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.project-workspaces button[aria-pressed="true"] {
+  background: var(--accent);
+}
+.training-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 32px;
+}
+.training-heading,
+.training-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.training-heading {
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+.training-heading h1 {
+  margin: 0 0 5px;
+  font:
+    600 23px "Manrope",
+    sans-serif;
+}
+.training-heading span,
+.training-history span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.training-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 28px;
+  max-width: 1400px;
+  margin: auto;
+}
+.training-history {
+  border-right: 1px solid var(--border);
+  padding-right: 16px;
+}
+.training-history > button {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 12px;
+  border-radius: 7px;
+  margin-bottom: 5px;
+}
+.training-history > button.selected {
+  background: var(--accent);
+}
+.training-history > p {
+  color: var(--muted);
+  font-size: 13px;
+}
+.training-content {
+  min-width: 0;
+}
+.training-section {
+  border: 1px solid var(--border);
+  background: var(--paper);
+  padding: 20px;
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.training-section h2,
+.training-content h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+.training-row {
+  margin: 12px 0;
+}
+.training-row > label {
+  flex: 1;
+  min-width: 110px;
+  font-size: 12px;
+  display: grid;
+  gap: 7px;
+}
+.training-row > select {
+  flex: 1;
+}
+.training-row .checkbox-label {
+  display: flex;
+  flex: initial;
+}
+.training-content details {
+  margin-top: 16px;
+}
+.training-content summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 0;
+}
+.training-images {
+  max-height: 280px;
+  overflow: auto;
+  margin: 14px 0;
+}
+.training-content table {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+  font-size: 12px;
+}
+.training-content th,
+.training-content td {
+  border-bottom: 1px solid var(--border);
+  padding: 8px;
+}
+.training-content th {
+  font-weight: 500;
+  color: var(--muted);
+}
+.training-content td button {
+  text-align: left;
+  text-decoration: underline;
+}
+.training-content td select {
+  padding: 5px;
+  font-size: 12px;
+}
+.training-counts {
+  font-size: 12px;
+  color: var(--muted);
+}
+.training-error {
+  color: #9c3227;
+  background: #faeeeb;
+  padding: 12px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+.training-error button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 12px;
+}
+.training-curves {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin: 22px 0;
+}
+.training-chart {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  background: var(--paper);
+}
+.training-chart h3 {
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+.training-chart svg {
+  width: 100%;
+  color: var(--muted);
+  fill: currentColor;
+}
+.training-empty-chart {
+  display: grid;
+  place-items: center;
+  min-height: 140px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.training-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.training-content progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--green);
+}
+.training-pairing {
+  padding: 12px;
+  background: var(--surface);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.training-pairing code {
+  user-select: all;
+}
+@media (max-width: 1100px) {
+  .app-header {
+    gap: 9px;
+    padding: 0 14px;
+  }
+  .brand {
+    font-size: 14px;
+  }
+  .training-workspace {
+    padding: 18px;
+  }
+  .training-layout {
+    grid-template-columns: 160px minmax(0, 1fr);
+    gap: 16px;
+  }
+  .training-curves {
+    grid-template-columns: 1fr;
+  }
+}
+
+.training-preview > svg {
+  display: block;
+  width: 100%;
+  max-height: 460px;
+  background: #141716;
+  border-radius: 8px;
+  margin-top: 12px;
+}
+.training-preview {
+  margin-top: 16px;
+}

@@ -78,8 +78,9 @@ app = FastAPI(title="Annotation and Training", version="0.1.0")
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 app.add_middleware(VisualUploadLimitMiddleware)
 ORIGINS = {"http://localhost:8765", "http://127.0.0.1:8765", "http://localhost:5173", "http://127.0.0.1:5173"}
-app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST", "PUT", "PATCH"], allow_headers=["Content-Type", "X-Requested-With", "X-Project-Directory", "X-Annotation-State-Version"])
-engine = Sam3Engine()
+app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-Requested-With", "X-Project-Directory", "X-Annotation-State-Version"])
+from .training.gpu import reserve_sam_gpu
+engine = Sam3Engine(cuda_reservation=reserve_sam_gpu)
 translator = PromptTranslator()
 _store: ProjectStore | None = None
 _project_lock = threading.RLock()
@@ -87,6 +88,8 @@ _project_lock = threading.RLock()
 
 @app.middleware("http")
 async def local_origin(request: Request, call_next):
+    if request.url.path.startswith("/api/training-agent") and request.client and request.client.host not in {"127.0.0.1", "::1", "testclient"}:
+        return JSONResponse({"detail": "Local training accepts only agents on this computer."}, status_code=403)
     origin = request.headers.get("origin")
     if request.url.path.startswith("/api") and origin and origin not in ORIGINS:
         return JSONResponse({"detail": "Origin not allowed."}, status_code=403)
@@ -374,6 +377,11 @@ def masks_fill_holes(body: FillHolesInput, request: Request):
     return {**mask_payload(cleaned), "filled_holes": filled_holes, "filled_pixels": filled_pixels}
 
 
+@app.post("/api/model/unload")
+async def unload_model():
+    return await run_in_threadpool(engine.unload)
+
+
 @app.post("/api/model/load")
 async def load_model():
     try:
@@ -508,6 +516,21 @@ def download_coco(request: Request):
     if not path.is_file():
         raise HTTPException(404, "Export the project first.")
     return FileResponse(path, media_type="application/json", filename=path.name)
+
+
+from app.training.local import LocalBackend
+from app.training.routes import project_router
+
+from app.training.control import LocalControl
+from app.training.transport import install_agent
+training_control = LocalControl(ROOT / ".cache" / "training-control")
+def training_backend(request):
+    project = store(request)
+    backend = LocalBackend(project, lambda: training_control.devices(project.directory))
+    backend.control = training_control
+    return backend
+app.include_router(project_router(training_backend), prefix="/api/training")
+install_agent(app, training_control, "/api/training-agent")
 
 
 if (ROOT / "frontend" / "dist").is_dir():
