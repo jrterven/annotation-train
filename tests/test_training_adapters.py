@@ -106,6 +106,26 @@ def test_segmentation_predictions_discard_empty_masks(tmp_path, monkeypatch, fam
             assert np.array_equal(decode_mask(proposal["mask"]), mask)
 
 
+@pytest.mark.parametrize("family", ["yolo26", "rfdetr"])
+def test_test_evaluation_keeps_box_head_results_when_masks_are_empty(tmp_path, monkeypatch, family):
+    from app.training import adapters
+
+    manifest, _, mask = fixture(tmp_path, "segmentation")
+    manifest["classes"] = [{"index": 0, "category_id": 7, "name": "Object"}]
+    for image in manifest["images"]:
+        image["split"] = "test"
+    ys, xs = np.where(mask)
+    box = [xs.min(), ys.min(), xs.max() + 1, ys.max() + 1]
+    monkeypatch.setattr(adapters, "predictor", lambda *_: lambda *_: (
+        [box], [0], [0.9], np.zeros((1, *mask.shape), bool)
+    ))
+    report = adapters.evaluate({
+        "model": {"family": family}, "dataset_id": "snapshot", "checkpoint_sha256": "verified"
+    }, manifest, tmp_path)
+    assert report["metrics"]["mAP50-95"] == pytest.approx(0)
+    assert report["metrics"]["box-mAP50-95"] == pytest.approx(1)
+
+
 def test_final_coco_report_is_serializable_and_uses_only_test(tmp_path, monkeypatch):
     from app.training import adapters
     from app.training.data import encoded
@@ -118,11 +138,12 @@ def test_final_coco_report_is_serializable_and_uses_only_test(tmp_path, monkeypa
     monkeypatch.setattr(
         adapters,
         "predict",
-        lambda *_: {
+        lambda *_, **_kwargs: {
             "images": [
                 {
                     "image_id": image["id"],
                     "proposals": [{"category_id": 7, "bbox": [1, 1, 8, 9], "score": 0.9}],
+                    "boxes": [{"category_id": 7, "bbox": [1, 1, 8, 9], "score": 0.9}],
                 }
                 for image in manifest["images"]
             ]
