@@ -46,7 +46,11 @@ export function PublicDocument({ page }: { page: "privacy" | "terms" }) {
             When you request segmentation, images and prompts are sent over a
             private network to GPU servers operated for this service. Spanish
             prompts may be translated to English to run the model. Your uploads
-            and prompts are not used to train models.
+            and prompts are not used to train models unless you explicitly start
+            a training run. For requested training, evaluation, or predictions,
+            selected images and annotations are transferred over encrypted
+            connections to the computers you link to your account. You control
+            these computers and can revoke their access.
           </p>
           <h2>Retention and deletion</h2>
           <p>
@@ -56,7 +60,11 @@ export function PublicDocument({ page }: { page: "privacy" | "terms" }) {
             Temporary files, generated exports, and completed inference requests
             and results are scheduled for removal after 24 hours. Requests
             waiting in the queue for 24 hours expire without using your daily
-            inference quota. Contact us to request deletion of your account.
+            inference quota. Training datasets, metrics, test reports, and
+            models remain until their execution or project is deleted and count
+            toward storage limits. Model files and checkpoints also remain on
+            your linked computer; removing cloud results does not erase those
+            local copies. Contact us to request deletion of your account.
           </p>
           <h2>Service operation</h2>
           <p>
@@ -114,6 +122,7 @@ export function PublicDocument({ page }: { page: "privacy" | "terms" }) {
 }
 
 export default function RuntimeApp() {
+  const [trainingEnabled, setTrainingEnabled] = useState(false);
   const [mode, setMode] = useState<"local" | "hosted" | null>(null);
   const [session, setSession] = useState<HostedSession | null>(null);
   const [error, setError] = useState("");
@@ -152,6 +161,7 @@ export default function RuntimeApp() {
       }
       if (config.mode !== "hosted")
         throw new Error("The server returned an unsupported configuration.");
+      setTrainingEnabled(config.training_enabled === true);
       configureApi("hosted");
       const current = await api<HostedSession>("/auth/session");
       if (!active) return;
@@ -307,6 +317,7 @@ export default function RuntimeApp() {
       )}
       <div className="hosted-editor" inert={expired || undefined}>
         <App
+          trainingEnabled={trainingEnabled}
           hostedSession={session}
           onLogout={async () => {
             sessionRequest.current++;

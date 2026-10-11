@@ -40,6 +40,7 @@ class DatasetInput(Strict):
     validation_percent: int = Field(default=20, ge=1, le=99)
     test_percent: int = Field(default=0, ge=0, le=98)
     assignments: dict[int, Split] = Field(default_factory=dict)
+    expected_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude=True)
 
     @model_validator(mode="after")
     def percentages(self):

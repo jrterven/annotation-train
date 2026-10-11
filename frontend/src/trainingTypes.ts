@@ -32,7 +32,7 @@ export type DatasetSnapshot = {
   task: Task;
   counts: Partial<Record<Split, number>>;
   warnings: string[];
-  images?: (ReviewImage & { split: Split })[];
+  fingerprint: string;
 };
 export type ClassMetric = {
   category_id: number;
@@ -80,6 +80,7 @@ export type TrainingRun = {
   };
 };
 export type TrainingOverview = {
+  active_runs?: number;
   catalog: TrainingModel[];
   images: ReviewImage[];
   datasets: DatasetSnapshot[];

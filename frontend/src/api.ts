@@ -245,3 +245,26 @@ export async function api<T>(
 export const uid = () => crypto.randomUUID();
 export const errorText = (err: unknown) =>
   err instanceof Error ? err.message : String(err);
+
+// Capture project identity before awaiting saves or long-running actions. A tab
+// may select another project while a training request is being prepared.
+export function projectClient(project: { id?: string; directory?: string }) {
+  const mode = hosted;
+  const prefix = mode
+    ? `/api/v1/projects/${encodeURIComponent(project.id || "")}`
+    : "/api";
+  const headers: Record<string, string> =
+    !mode && project.directory
+      ? { "X-Project-Directory": encodeURIComponent(project.directory) }
+      : {};
+  return async function scoped<T>(
+    path: string,
+    method = "GET",
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return (
+      await request<T>(prefix + path, method, body, signal, { ...headers })
+    ).data;
+  };
+}

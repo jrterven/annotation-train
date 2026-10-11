@@ -114,6 +114,10 @@ class TrainingService:
         source = self.backend.capture()
         with self.repo.transaction() as records:
             result = make_dataset(source, reviews_by_key(records), body)
+        if body.expected_fingerprint and body.expected_fingerprint != result["fingerprint"]:
+            raise RevisionConflict(
+                "Reviewed data changed. Preview the split again before creating a version."
+            )
         if preview:
             return result
         # Retain original bytes before committing the immutable manifest. Crash
