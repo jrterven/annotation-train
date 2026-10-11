@@ -276,6 +276,13 @@ class TrainingService:
                 for artifact in artifacts:
                     records.delete("artifact", artifact["id"])
             records.delete(kind, key)
+            if kind == "dataset":
+                # A pre-upgrade snapshot may be deleted before the first new
+                # snapshot initializes the sequence. Retain its version now.
+                sequence = records.get("sequence", "dataset") or {"last_version": 0}
+                records.put("sequence", "dataset", {
+                    "last_version": max(sequence["last_version"], value["version"])
+                })
         if not self.backend.hosted:
             from .transport import root
 

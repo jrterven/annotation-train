@@ -190,6 +190,39 @@ def test_dataset_versions_survive_deleting_older_latest_and_all_snapshots(enviro
     create(5, 5)
 
 
+@pytest.mark.parametrize("deleted_versions", [(1,), (2,), (1, 2)])
+def test_legacy_dataset_versions_survive_deletion_before_first_new_snapshot(environment, deleted_versions):
+    from app.training.store import LocalRepository
+    from app.hosted.training import PostgresRepository
+    from app.hosted.models import Project
+
+    env = environment
+    client, base = env["client"], env["root"] + "/training"
+    overview = ok(client.get(base, params={"task": "detection"}))
+    ok(client.post(base + "/reviews", json={
+        "task": "detection", "images": {im["id"]: im["revision"] for im in overview["images"]}
+    }))
+    snapshots = {
+        seed: ok(client.post(base + "/datasets", json={"task": "detection", "seed": seed}))
+        for seed in (1, 2)
+    }
+    if env["mode"] == "local":
+        repo = LocalRepository(main._store.directory)
+    else:
+        settings, db, objects, _, _ = env["hosted"]
+        project_id = env["root"].split("/")[-1]
+        with db.session() as session:
+            user_id = session.get(Project, project_id).user_id
+        repo = PostgresRepository(settings, db, objects, user_id, project_id)
+    # Simulate an upgrade from snapshots stored before sequence records existed.
+    with repo.transaction() as records:
+        records.delete("sequence", "dataset")
+    for version in deleted_versions:
+        ok(client.delete(base + "/datasets/" + snapshots[version]["id"]))
+    created = ok(client.post(base + "/datasets", json={"task": "detection", "seed": 3}))
+    assert created["version"] == 3
+
+
 def update(env, agent, assigned, sequence=0, **event):
     return agent.post(
         env["agent_root"] + "/update",
