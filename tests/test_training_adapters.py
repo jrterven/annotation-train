@@ -1,5 +1,6 @@
 import hashlib
 import json
+import httpx
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -85,6 +86,46 @@ def test_named_losses_in_pinned_yolo_runtime():
     assert total_loss(None) is None
 
 
+@pytest.mark.parametrize("family", ["yolo26", "rfdetr"])
+@pytest.mark.parametrize("all_empty", [False, True])
+def test_segmentation_predictions_discard_empty_masks(tmp_path, monkeypatch, family, all_empty):
+    from app.training import adapters
+
+    manifest, _, mask = fixture(tmp_path, "segmentation")
+    manifest["classes"] = [{"index": 0, "category_id": 7}]
+    masks = np.stack([np.zeros_like(mask), np.zeros_like(mask) if all_empty else mask])
+    monkeypatch.setattr(adapters, "predictor", lambda *_: lambda *_: (
+        np.array([[1, 1, 9, 10], [1, 1, 9, 10]]), [0, 0], [0.01, 0.02], masks
+    ))
+    result = adapters.predict({"model": {"family": family}}, manifest, tmp_path)
+    for image in result["images"]:
+        assert len(image["proposals"]) == (0 if all_empty else 1)
+        if not all_empty:
+            proposal = image["proposals"][0]
+            assert proposal["category_id"] == 7 and proposal["score"] == 0.02
+            assert np.array_equal(decode_mask(proposal["mask"]), mask)
+
+
+@pytest.mark.parametrize("family", ["yolo26", "rfdetr"])
+def test_test_evaluation_keeps_box_head_results_when_masks_are_empty(tmp_path, monkeypatch, family):
+    from app.training import adapters
+
+    manifest, _, mask = fixture(tmp_path, "segmentation")
+    manifest["classes"] = [{"index": 0, "category_id": 7, "name": "Object"}]
+    for image in manifest["images"]:
+        image["split"] = "test"
+    ys, xs = np.where(mask)
+    box = [xs.min(), ys.min(), xs.max() + 1, ys.max() + 1]
+    monkeypatch.setattr(adapters, "predictor", lambda *_: lambda *_: (
+        [box], [0], [0.9], np.zeros((1, *mask.shape), bool)
+    ))
+    report = adapters.evaluate({
+        "model": {"family": family}, "dataset_id": "snapshot", "checkpoint_sha256": "verified"
+    }, manifest, tmp_path)
+    assert report["metrics"]["mAP50-95"] == pytest.approx(0)
+    assert report["metrics"]["box-mAP50-95"] == pytest.approx(1)
+
+
 def test_final_coco_report_is_serializable_and_uses_only_test(tmp_path, monkeypatch):
     from app.training import adapters
     from app.training.data import encoded
@@ -97,11 +138,12 @@ def test_final_coco_report_is_serializable_and_uses_only_test(tmp_path, monkeypa
     monkeypatch.setattr(
         adapters,
         "predict",
-        lambda *_: {
+        lambda *_, **_kwargs: {
             "images": [
                 {
                     "image_id": image["id"],
                     "proposals": [{"category_id": 7, "bbox": [1, 1, 8, 9], "score": 0.9}],
+                    "boxes": [{"category_id": 7, "bbox": [1, 1, 8, 9], "score": 0.9}],
                 }
                 for image in manifest["images"]
             ]
@@ -115,8 +157,6 @@ def test_final_coco_report_is_serializable_and_uses_only_test(tmp_path, monkeypa
 
 
 def test_agent_transport_only_https_or_loopback_and_private_credentials(tmp_path):
-    assert server_url("http://127.0.0.1:8765").endswith("/api/training-agent")
-    assert server_url("https://annotation.example").endswith("/api/v1/training-agent")
     for value in (
         "http://gpu.example",
         "https://user:pass@example.com",
@@ -127,3 +167,39 @@ def test_agent_transport_only_https_or_loopback_and_private_credentials(tmp_path
     path = tmp_path / "agent.json"
     write_private(path, {"token": "disposable"})
     assert path.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("origin,status,config,suffix", [
+    ("http://localhost:8765", 200, {"mode": "hosted"}, "/api/v1/training-agent"),
+    ("https://annotation.example", 200, {"mode": "hosted"}, "/api/v1/training-agent"),
+    ("http://127.0.0.1:8765", 404, {}, "/api/training-agent"),
+    ("http://[::1]:8765", 200, {"mode": "local"}, "/api/training-agent"),
+])
+def test_agent_discovers_application_mode_before_pairing(origin, status, config, suffix):
+    def respond(request):
+        assert request.method == "GET" and request.url.path == "/api/config"
+        assert "authorization" not in request.headers
+        return httpx.Response(status, json=config)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        assert server_url(origin, client=client) == origin + suffix
+
+
+@pytest.mark.parametrize("origin,status,config", [
+    ("https://annotation.example", 404, {}),
+    ("http://localhost:8765", 503, {}),
+    ("http://localhost:8765", 302, {}),
+    ("http://localhost:8765", 200, {"mode": "unknown"}),
+    ("https://annotation.example", 200, {"mode": "local"}),
+])
+def test_agent_discovery_fails_closed(origin, status, config):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(status, json=config, headers={"Location": "https://other.example"})
+
+    with httpx.Client(transport=httpx.MockTransport(respond), follow_redirects=True) as client:
+        with pytest.raises((ValueError, httpx.HTTPStatusError)):
+            server_url(origin, client=client)
+    assert len(requests) == 1

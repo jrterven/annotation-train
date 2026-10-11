@@ -490,7 +490,7 @@ def predictor(work, checkpoint):
     return infer
 
 
-def predict(work, manifest, directory):
+def predict(work, manifest, directory, *, include_boxes=False):
     from app.geometry import mask_payload
 
     infer = predictor(
@@ -506,6 +506,7 @@ def predict(work, manifest, directory):
             clean.save(path)
         boxes, labels, scores, masks = infer(path, work.get("confidence", 0.001))
         proposals = []
+        box_results = []
         for index, (box, label, score) in enumerate(zip(boxes, labels, scores)):
             if int(label) not in classes:
                 raise ValueError("Model class mapping differs from the saved manifest")
@@ -516,14 +517,24 @@ def predict(work, manifest, directory):
                 "iscrowd": 0,
                 "bbox": [x1, y1, x2 - x1, y2 - y1],
             }
+            if include_boxes:
+                box_results.append(dict(value))
             if manifest["task"] == "segmentation":
                 if masks is None or masks[index].shape != (image["height"], image["width"]):
                     raise ValueError("Model did not return an original-resolution mask")
-                value.update(mask_payload(masks[index].astype(bool), include_preview=False))
+                mask = masks[index].astype(bool)
+                # Low-confidence detections can have no foreground pixels.
+                # They cannot become annotations or valid COCO mask results.
+                if not mask.any():
+                    continue
+                value.update(mask_payload(mask, include_preview=False))
             else:
                 value["kind"] = "bbox"
             proposals.append(value)
-        results.append({"image_id": image["id"], "proposals": proposals})
+        result = {"image_id": image["id"], "proposals": proposals}
+        if include_boxes:
+            result["boxes"] = box_results
+        results.append(result)
         path.unlink(missing_ok=True)
     return {"images": results}
 
@@ -535,7 +546,7 @@ def evaluate(work, manifest, directory):
     from pycocotools.cocoeval import COCOeval
     from pycocotools import mask as mu
 
-    result = predict({**work, "confidence": 0.001}, manifest, directory)
+    result = predict({**work, "confidence": 0.001}, manifest, directory, include_boxes=True)
     ground = {
         "info": {},
         "images": [],
@@ -581,6 +592,7 @@ def evaluate(work, manifest, directory):
             else:
                 item["bbox"] = proposal["bbox"]
             detections.append(item)
+        for proposal in image["boxes"]:
             boxes.append(
                 {
                     "image_id": image["image_id"],

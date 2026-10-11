@@ -36,7 +36,7 @@ def write_private(path, value):
     os.replace(temporary, path)
 
 
-def server_url(value):
+def server_url(value, *, client=None):
     parsed = urlparse(value)
     local = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
     if (
@@ -45,11 +45,28 @@ def server_url(value):
         or parsed.query
         or parsed.fragment
         or parsed.path not in {"", "/"}
+        or not parsed.hostname
     ):
         raise ValueError("Provide the application's origin, without credentials or a path")
     if parsed.scheme != "https" and not (local and parsed.scheme == "http"):
         raise ValueError("Agents require HTTPS; HTTP is allowed only on loopback")
-    return value.rstrip("/") + ("/api/training-agent" if local else "/api/v1/training-agent")
+    origin = value.rstrip("/")
+    if client is None:
+        with httpx.Client(timeout=30, follow_redirects=False) as connection:
+            return server_url(value, client=connection)
+    response = client.get(origin + "/api/config", follow_redirects=False)
+    # Local releases have no config route. Never infer local mode from a
+    # successful hosted response, nor from a failed remote discovery request.
+    if response.status_code == 404 and local:
+        return origin + "/api/training-agent"
+    response.raise_for_status()
+    config = response.json()
+    mode = config.get("mode") if isinstance(config, dict) else None
+    if mode == "hosted":
+        return origin + "/api/v1/training-agent"
+    if mode == "local" and local:
+        return origin + "/api/training-agent"
+    raise ValueError("The application must report hosted mode, or local mode on loopback")
 
 
 def capabilities(weights):
