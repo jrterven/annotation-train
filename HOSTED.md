@@ -338,6 +338,12 @@ toward account/global quotas. Admission reserves event space and uploads reserve
 their declared bytes before accepting data. Project/run deletion releases charged
 metadata; reconciliation preserves objects referenced by retained backups.
 
+Dataset versions use a project-scoped high-water mark in the existing training
+records table. It is initialized from retained snapshots, updated atomically
+with each new version, quota-accounted and backed up with other records. Deleting
+snapshots never resets the counter. No schema migration is required; retain this
+record during rollback to preserve numbering after a later upgrade.
+
 Before enabling writes:
 
 1. Take and verify a coordinated PostgreSQL/project/object backup. Keep training

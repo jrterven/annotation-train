@@ -1,5 +1,6 @@
 import hashlib
 import json
+import httpx
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -115,8 +116,6 @@ def test_final_coco_report_is_serializable_and_uses_only_test(tmp_path, monkeypa
 
 
 def test_agent_transport_only_https_or_loopback_and_private_credentials(tmp_path):
-    assert server_url("http://127.0.0.1:8765").endswith("/api/training-agent")
-    assert server_url("https://annotation.example").endswith("/api/v1/training-agent")
     for value in (
         "http://gpu.example",
         "https://user:pass@example.com",
@@ -127,3 +126,39 @@ def test_agent_transport_only_https_or_loopback_and_private_credentials(tmp_path
     path = tmp_path / "agent.json"
     write_private(path, {"token": "disposable"})
     assert path.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("origin,status,config,suffix", [
+    ("http://localhost:8765", 200, {"mode": "hosted"}, "/api/v1/training-agent"),
+    ("https://annotation.example", 200, {"mode": "hosted"}, "/api/v1/training-agent"),
+    ("http://127.0.0.1:8765", 404, {}, "/api/training-agent"),
+    ("http://[::1]:8765", 200, {"mode": "local"}, "/api/training-agent"),
+])
+def test_agent_discovers_application_mode_before_pairing(origin, status, config, suffix):
+    def respond(request):
+        assert request.method == "GET" and request.url.path == "/api/config"
+        assert "authorization" not in request.headers
+        return httpx.Response(status, json=config)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        assert server_url(origin, client=client) == origin + suffix
+
+
+@pytest.mark.parametrize("origin,status,config", [
+    ("https://annotation.example", 404, {}),
+    ("http://localhost:8765", 503, {}),
+    ("http://localhost:8765", 302, {}),
+    ("http://localhost:8765", 200, {"mode": "unknown"}),
+    ("https://annotation.example", 200, {"mode": "local"}),
+])
+def test_agent_discovery_fails_closed(origin, status, config):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(status, json=config, headers={"Location": "https://other.example"})
+
+    with httpx.Client(transport=httpx.MockTransport(respond), follow_redirects=True) as client:
+        with pytest.raises((ValueError, httpx.HTTPStatusError)):
+            server_url(origin, client=client)
+    assert len(requests) == 1
