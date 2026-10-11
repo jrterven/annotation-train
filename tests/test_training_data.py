@@ -1,10 +1,12 @@
 import copy
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 from app.training.data import DatasetInput, fingerprint, make_dataset, review_key
 from app.training.store import LocalRepository
+from app.training.local import LocalBackend
 
 
 def source(count=10):
@@ -102,3 +104,26 @@ def test_local_records_rollback_and_survive_reopen(tmp_path):
         raise RuntimeError()
     with LocalRepository(tmp_path).transaction() as records:
         assert records.get("review", "one") == {"reviewed": True}
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_retained_original_is_verified_each_time_it_is_read(tmp_path, replace):
+    original = tmp_path / "original.png"
+    original.write_bytes(b"original image bytes")
+    backend = LocalBackend(SimpleNamespace(directory=tmp_path, image_path=lambda _: original))
+    image = {"id": 1, "sha256": hashlib.sha256(original.read_bytes()).hexdigest()}
+    backend.retain({"images": [image]})
+    retained = backend.image(image)
+    original.write_bytes(b"later original edits do not change the snapshot")
+    assert backend.image(image).read_bytes() == b"original image bytes"
+    if replace:
+        replacement = tmp_path / "replacement.png"
+        replacement.write_bytes(b"replaced retained content")
+        replacement.replace(retained)
+    else:
+        retained.write_bytes(b"modified retained content")
+    with pytest.raises(ValueError, match="recorded content"):
+        backend.image(image)
+    retained.unlink()
+    with pytest.raises(FileNotFoundError, match="unavailable"):
+        backend.image(image)

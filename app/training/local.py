@@ -52,4 +52,7 @@ class LocalBackend:
         path = self.repo.root / "images" / image["sha256"]
         if not path.is_file():
             raise FileNotFoundError("Snapshot original is unavailable")
+        with path.open("rb") as source:
+            if hashlib.file_digest(source, "sha256").hexdigest() != image["sha256"]:
+                raise ValueError("Snapshot original no longer matches its recorded content.")
         return path
