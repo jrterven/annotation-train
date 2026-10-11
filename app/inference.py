@@ -55,6 +55,7 @@ class Sam3Engine:
         cache_size: int = 2,
         confidence_threshold: float = 0.5,
         revision: str | None = None,
+        cuda_reservation=None,
     ) -> None:
         self.lock = threading.RLock()
         self._status_lock = threading.Lock()
@@ -79,6 +80,8 @@ class Sam3Engine:
         self._device: str | None = None
         self._fallback_reason: str | None = None
         self.last_timings: dict[str, float] = {}
+        self._cuda_reservation = cuda_reservation
+        self._gpu_reservation = None
 
     def status(self) -> dict:
         # Polling /health must not wait for a download or an inference call.
@@ -120,6 +123,10 @@ class Sam3Engine:
 
                 self._torch = torch
                 self._device = self._choose_device()
+                if self._device == "cuda" and self._cuda_reservation:
+                    reservation = self._cuda_reservation()
+                    reservation.__enter__()
+                    self._gpu_reservation = reservation
                 kwargs = {"revision": self.revision}
                 self._detector_processor = Sam3Processor.from_pretrained(self.model_id, **kwargs)
                 self._tracker_processor = Sam3TrackerProcessor.from_pretrained(self.model_id, **kwargs)
@@ -178,6 +185,23 @@ class Sam3Engine:
         self._clear_caches()
         self._detector = self._tracker = None
         self._detector_processor = self._tracker_processor = None
+        if self._gpu_reservation is not None:
+            import gc
+            gc.collect()
+            try:
+                if self._torch is not None:
+                    self._torch.cuda.empty_cache()
+            finally:
+                self._gpu_reservation.__exit__(None, None, None)
+                self._gpu_reservation = None
+
+    def unload(self) -> dict:
+        with self.lock:
+            self._release_models()
+            self._device = None
+            self._fallback_reason = None
+            self._set_status("unloaded", "SAM 3 is not loaded.")
+            return self.status()
 
     def _fallback_to_cpu(self, error: Exception) -> None:
         self._clear_caches()

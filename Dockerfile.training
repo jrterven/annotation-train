@@ -1,0 +1,14 @@
+# Supply an immutable NVIDIA PyTorch image compatible with your architecture/driver.
+# This image is built and run on the user's computer, never on the hosted CPU server.
+ARG TRAINING_BASE_IMAGE
+FROM ${TRAINING_BASE_IMAGE}
+WORKDIR /opt/annotation
+RUN apt-get update && apt-get install -y --no-install-recommends libxcb1 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    YOLO_AUTOINSTALL=false WANDB_MODE=disabled HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
+COPY requirements-training.txt ./
+RUN python -m pip install --no-cache-dir -r requirements-training.txt
+COPY app/ ./app/
+COPY scripts/validate_training_runtime.py scripts/validate_training_cycle.py ./scripts/
+ENTRYPOINT ["python", "-m", "app.training.agent"]
